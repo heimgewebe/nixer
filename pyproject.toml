@@ -1,0 +1,16 @@
+[project]
+name = "nixer"
+version = "0.1.0"
+description = "Nix-only specialist MCP for Nix, Nixpkgs and NixOS"
+requires-python = ">=3.10"
+dependencies = ["mcp==1.30.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
