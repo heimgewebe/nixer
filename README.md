@@ -86,3 +86,14 @@ HTTP bindet ausschließlich Loopback:
 ```
 
 Ein produktiver Tunnel oder ChatGPT-Plugin-Publish ist **nicht Teil von v0**, bevor der Fachpfad mit realen Nix-Fällen bewiesen wurde.
+
+## Lokaler Dienst
+
+Nach erfolgreichem Fachpfad kann Nixer als loopback-only User-Service auf `127.0.0.1:18187` laufen. Die versionierte Unit liegt unter `deploy/nixer-mcp.service`. Sie veröffentlicht Nixer nicht ins LAN oder Internet; ein Tunnel oder ChatGPT-Plugin bleibt ein separater, ausdrücklich zu prüfender Schritt.
+
+Installation auf dem Heim-PC:
+
+```bash
+systemctl --user link "$PWD/deploy/nixer-mcp.service"
+systemctl --user enable --now nixer-mcp.service
+```
