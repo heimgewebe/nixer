@@ -174,12 +174,12 @@ class _RedactingLineMirror:
     def _secret_block_scalar_base_indent(text: str) -> int | None:
         logical = text.rstrip("\r\n")
         match = re.search(
-            r"""(?i)^(?P<indent>[ \t]*)(?:-\s+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
+            r"""(?i)^(?P<indent>[ \t]*)(?P<sequence>-\s+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
             logical,
         )
         if match is None:
             return None
-        return len(match.group("indent"))
+        return len(match.group("indent")) + len(match.group("sequence") or "")
 
     @staticmethod
     def _find_unescaped_quote(text: str, quote: str) -> int | None:

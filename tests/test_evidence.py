@@ -161,24 +161,31 @@ def test_pump_redacts_yaml_block_scalar_with_modifiers() -> None:
 
 def test_pump_redacts_yaml_sequence_block_scalar_credential() -> None:
     label = b"pass" + b"word"
-    stream = io.BytesIO(
-        b"  - " + label + b": |\n      list-secret-one\n      list-secret-two\n  - safe: visible\n"
+    cases = (
+        b"  - " + label + b": |\n      list-secret-one\n      list-secret-two\n    safe: visible\n  - next: visible\n",
+        b"  - \"" + label + b"\": >-\n      list-secret-one\n      list-secret-two\n    safe: visible\n  - next: visible\n",
+        b"  - " + label + b": |2\n      list-secret-one\n      list-secret-two\n    safe: visible\n  - next: visible\n",
+        b"  - '" + label + b"': >2-\n      list-secret-one\n      list-secret-two\n    safe: visible\n  - next: visible\n",
     )
-    mirror = io.StringIO()
-    state = {"truncated": False}
-    captured = bytearray()
 
-    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
 
-    detail = captured.decode("utf-8", errors="replace")
-    live = mirror.getvalue()
-    for secret in ("list-secret-one", "list-secret-two"):
-        assert secret not in detail
-        assert secret not in live
-    assert "safe: visible" in detail
-    assert "safe: visible" in live
-    assert detail.count("<REDACTED>") >= 3
-    assert live.count("<REDACTED>") >= 3
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in ("list-secret-one", "list-secret-two"):
+            assert secret not in detail
+            assert secret not in live
+        for visible in ("safe: visible", "next: visible"):
+            assert visible in detail
+            assert visible in live
+        assert detail.count("<REDACTED>") >= 3
+        assert live.count("<REDACTED>") >= 3
 
 
 def test_pump_redacts_quoted_label_value_continuation() -> None:
