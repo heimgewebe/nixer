@@ -151,6 +151,7 @@ class _RedactingLineMirror:
         self.pending = bytearray()
         self.private_key_block = False
         self.secret_value_continuation = False
+        self.secret_quoted_value_quote: str | None = None
         self.disabled = False
 
     @staticmethod
@@ -163,10 +164,38 @@ class _RedactingLineMirror:
         logical = text.rstrip("\r\n")
         return bool(
             re.search(
-                r"(?i)(?:authorization|api[_-]?key|token|password|secret)\s*[:=]\s*$",
+                r'''(?i)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*$''',
                 logical,
             )
         )
+
+    @staticmethod
+    def _find_unescaped_quote(text: str, quote: str) -> int | None:
+        escaped = False
+        for index, char in enumerate(text):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                return index
+        return None
+
+    @classmethod
+    def _secret_quoted_value_start(cls, text: str) -> str | None:
+        logical = text.rstrip("\r\n")
+        match = re.search(
+            r'''(?i)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*(?P<value_quote>["'])''',
+            logical,
+        )
+        if match is None:
+            return None
+        quote = match.group("value_quote")
+        if cls._find_unescaped_quote(logical[match.end() :], quote) is not None:
+            return None
+        return quote
 
     @staticmethod
     def _line_ending(text: str) -> str:
@@ -185,17 +214,39 @@ class _RedactingLineMirror:
             self.mirror.write("<REDACTED_PRIVATE_KEY_BLOCK>" + ending)
             self.private_key_block = (self.private_key_block or begin) and not end
             self.secret_value_continuation = False
+            self.secret_quoted_value_quote = None
+        elif self.secret_quoted_value_quote is not None:
+            logical = text[: -len(ending)] if ending else text
+            closing = self._find_unescaped_quote(logical, self.secret_quoted_value_quote)
+            if closing is None:
+                self.mirror.write("<REDACTED>" + ending)
+            else:
+                suffix = logical[closing + 1 :]
+                self.mirror.write("<REDACTED>" + server._redact(suffix) + ending)
+                self.secret_quoted_value_quote = None
         elif self.secret_value_continuation:
-            if text.rstrip("\r\n").strip():
+            logical = text[: -len(ending)] if ending else text
+            stripped = logical.lstrip()
+            if stripped:
+                if stripped[0] in {"\"", "'"}:
+                    quote = stripped[0]
+                    if self._find_unescaped_quote(stripped[1:], quote) is None:
+                        self.secret_quoted_value_quote = quote
                 self.mirror.write("<REDACTED>" + ending)
                 self.secret_value_continuation = False
             else:
                 self.mirror.write(ending)
-        elif self._secret_label_without_value(text):
-            self.mirror.write("<REDACTED>" + ending)
-            self.secret_value_continuation = True
         else:
-            self.mirror.write(server._redact(text))
+            quoted_value = self._secret_quoted_value_start(text)
+            if quoted_value is not None:
+                self.mirror.write("<REDACTED>" + ending)
+                self.secret_quoted_value_quote = quoted_value
+                self.secret_value_continuation = False
+            elif self._secret_label_without_value(text):
+                self.mirror.write("<REDACTED>" + ending)
+                self.secret_value_continuation = True
+            else:
+                self.mirror.write(server._redact(text))
         self.mirror.flush()
 
     def feed(self, raw: bytes) -> None:

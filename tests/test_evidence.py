@@ -76,6 +76,62 @@ def test_pump_redacts_quoted_multiword_credential_value() -> None:
     assert "<REDACTED>" in live
 
 
+def test_pump_redacts_quoted_credential_key() -> None:
+    key = b'"' + b"pass" + b"word" + b'"'
+    value = b'"correct ' + b"horse " + b"battery " + b'staple"'
+    stream = io.BytesIO(b"{" + key + b":" + value + b"}\n")
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    assert "correct horse battery staple" not in detail
+    assert "correct horse battery staple" not in live
+    assert "<REDACTED>" in detail
+    assert "<REDACTED>" in live
+
+
+def test_pump_redacts_multiline_quoted_credential_value() -> None:
+    label = b"pass" + b"word"
+    stream = io.BytesIO(label + b'= "correct\nhorse battery staple" suffix\n')
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    assert "correct" not in detail
+    assert "horse battery staple" not in detail
+    assert "correct" not in live
+    assert "horse battery staple" not in live
+    assert "suffix" in detail
+    assert "suffix" in live
+    assert detail.count("<REDACTED>") >= 2
+    assert live.count("<REDACTED>") >= 2
+
+
+def test_pump_redacts_quoted_label_value_continuation() -> None:
+    key = b'"' + b"pass" + b"word" + b'"'
+    stream = io.BytesIO(b"{" + key + b":\n" + b'"value-on-next-line"\n}')
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    assert "value-on-next-line" not in detail
+    assert "value-on-next-line" not in live
+    assert detail.count("<REDACTED>") >= 2
+    assert live.count("<REDACTED>") >= 2
+
+
 def test_pump_redacts_structured_tail_before_eviction() -> None:
     stream = io.BytesIO(b"x" * 64 + b" password=super-secret-value\n")
     mirror = io.StringIO()
