@@ -454,9 +454,21 @@ def _run_streaming(argv: list[str]) -> dict[str, Any]:
         )
     except FileNotFoundError:
         return {
-            "returncode": 127,
+            "returncode": None,
             "stdout": "",
             "failure_class": "container_client_unavailable",
+            "spawn_error": True,
+            "spawn_errno": None,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        }
+    except OSError as exc:
+        return {
+            "returncode": None,
+            "stdout": "",
+            "failure_class": "container_process_spawn_failed",
+            "spawn_error": True,
+            "spawn_errno": exc.errno,
             "stdout_truncated": False,
             "stderr_truncated": False,
         }
@@ -698,6 +710,48 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         }
 
     result = _run_streaming(_system_build_argv(root, git_common_dir, host_attr))
+    if result.get("spawn_error"):
+        failure = {
+            "class": result["failure_class"],
+            "detail": "container process could not be started",
+        }
+        if result.get("spawn_errno") is not None:
+            failure["errno"] = result["spawn_errno"]
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": failure,
+            "observed_at": observed_at,
+        }
+    adapter_failures = {
+        86: ("snapshot_head_mismatch", "source and snapshot Git HEAD differ"),
+        87: ("invalid_system_output_path", "system build returned an invalid output path"),
+    }
+    if result["returncode"] in adapter_failures:
+        failure_class, detail = adapter_failures[result["returncode"]]
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": {
+                "class": failure_class,
+                "adapter_exit_code": result["returncode"],
+                "detail": detail,
+                "detail_truncated": result["stderr_truncated"],
+            },
+            "observed_at": observed_at,
+        }
     if result["returncode"] != 0:
         return {
             "schema_version": 1,

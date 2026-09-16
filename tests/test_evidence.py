@@ -4,6 +4,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 import evidence
 
 
@@ -706,6 +708,80 @@ def test_system_build_returns_structured_failure_for_oversized_output(
     assert result["success"] is False
     assert result["status"] == "evidence_failed"
     assert result["failure"]["class"] == "structured_output_too_large"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "failure_class"),
+    [
+        (86, "snapshot_head_mismatch"),
+        (87, "invalid_system_output_path"),
+    ],
+)
+def test_system_build_classifies_reserved_adapter_exits(
+    monkeypatch, tmp_path: Path, returncode: int, failure_class: str
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": returncode,
+            "stdout": "",
+            "failure_class": "nix_build_failed",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+
+    assert result["success"] is False
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == failure_class
+    assert result["failure"]["adapter_exit_code"] == returncode
+    assert "nix_exit_code" not in result["failure"]
+
+
+def test_run_streaming_converts_spawn_oserror_to_structured_result(monkeypatch) -> None:
+    def fail_spawn(*_args, **_kwargs):
+        raise OSError(24, "too many open files")
+
+    monkeypatch.setattr(evidence.subprocess, "Popen", fail_spawn)
+
+    result = evidence._run_streaming([str(evidence.server.DOCKER_BIN), "run"])
+
+    assert result["returncode"] is None
+    assert result["spawn_error"] is True
+    assert result["failure_class"] == "container_process_spawn_failed"
+    assert result["spawn_errno"] == 24
+
+
+def test_system_build_returns_structured_spawn_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": None,
+            "stdout": "",
+            "failure_class": "container_process_spawn_failed",
+            "spawn_error": True,
+            "spawn_errno": 24,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+
+    assert result["success"] is False
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == "container_process_spawn_failed"
+    assert result["failure"]["errno"] == 24
 
 
 def test_system_build_failure_suppresses_freeform_diagnostics(monkeypatch, tmp_path: Path) -> None:
