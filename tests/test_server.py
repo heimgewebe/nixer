@@ -17,6 +17,23 @@ def _repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return repo
 
 
+def _linked_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    root = tmp_path / "repos"
+    common_repo = root / "source"
+    common_dir = common_repo / ".git"
+    git_dir = common_dir / "worktrees" / "fixture"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+    repo = root / "fixture"
+    repo.mkdir(parents=True)
+    (repo / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    monkeypatch.setattr(server, "REPO_ROOT", root.resolve())
+    return repo, common_dir.resolve()
+
+
 def test_status_declares_nix_only_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "_backend_probe", lambda: {"ready": True, "reason": "ready"})
     status = server.nixer_status()
@@ -78,9 +95,16 @@ def test_valid_nix_attr_paths_are_accepted() -> None:
     )
 
 
-def test_internal_runner_rejects_non_docker_executables() -> None:
+def test_internal_runner_rejects_non_container_executables() -> None:
     with pytest.raises(ValueError):
         server._run(["/usr/bin/bash", "-lc", "true"])
+
+
+def test_backend_probe_rejects_relative_container_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "DOCKER_BIN", Path("podman"))
+    backend = server._backend_probe()
+    assert backend["ready"] is False
+    assert backend["reason"] == "container_client_path_not_absolute"
 
 
 def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
@@ -115,7 +139,7 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     )
 
     assert result["ok"] is True
-    assert captured[0] == "/usr/bin/docker"
+    assert captured[0] == str(server.DOCKER_BIN)
     assert "--pull=never" in captured
     assert "--cap-drop=ALL" in captured
     assert "--cap-add=CHOWN" in captured
@@ -126,12 +150,67 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     assert f"type=bind,src={repo},dst=/workspace,readonly" in captured
     assert "/var/run/docker.sock" not in " ".join(captured)
     assert server.FLAKE_SOURCE in captured
+    assert result["backend"]["linked_worktree_git_metadata"] == "in-worktree"
     script = captured[captured.index("-lc") + 1]
     assert server.GIT_BIN in script
     assert server.NIX_BIN in script
     assert "clone --no-local --no-hardlinks" in script
     assert "diff --binary --no-ext-diff --no-textconv HEAD" in script
     assert 'allow-import-from-derivation false "$@"' in script
+
+
+def test_linked_worktree_mounts_only_exact_common_git_dir_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, common_dir = _linked_repo(tmp_path, monkeypatch)
+    captured: list[str] = []
+
+    monkeypatch.setattr(
+        server,
+        "_backend_probe",
+        lambda: {"ready": True, "reason": "ready", "image_id": server.PINNED_NIX_IMAGE_ID},
+    )
+
+    def fake_run(argv: list[str], *, timeout: int = 120):
+        captured.extend(argv)
+        return {
+            "returncode": 0,
+            "stdout": "{}\n",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(server, "_run", fake_run)
+    result = server._docker_nix(
+        str(repo),
+        ["flake", "metadata", "--json", "--no-write-lock-file", server.FLAKE_SOURCE],
+        operation="fixture",
+        expect_json=True,
+    )
+
+    mounts = [captured[index + 1] for index, value in enumerate(captured) if value == "--mount"]
+    assert f"type=bind,src={repo},dst=/workspace,readonly" in mounts
+    assert f"type=bind,src={common_dir},dst={common_dir},readonly" in mounts
+    assert result["backend"]["linked_worktree_git_metadata"] == "read-only-common-dir"
+
+
+def test_linked_worktree_common_git_dir_must_stay_under_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repos"
+    repo = root / "fixture"
+    repo.mkdir(parents=True)
+    outside_common = tmp_path / "outside" / ".git"
+    git_dir = outside_common / "worktrees" / "fixture"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (repo / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    monkeypatch.setattr(server, "REPO_ROOT", root.resolve())
+
+    with pytest.raises(PermissionError):
+        server._linked_git_common_dir(repo.resolve())
 
 
 def test_backend_unavailable_fails_closed_without_nix_execution(

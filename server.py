@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from mcp.types import ToolAnnotations
 APP_NAME = "Nixer"
 IDENTITY = "nixer-nix-specialist-v0"
 REPO_ROOT = Path("/home/alex/repos").resolve()
-DOCKER_BIN = Path("/usr/bin/docker")
+DOCKER_BIN = Path(os.environ.get("NIXER_DOCKER_BIN", "/usr/bin/docker"))
 NIX_BIN = "/nix/var/nix/profiles/default/bin/nix"
 GIT_BIN = "/nix/var/nix/profiles/default/bin/git"
 BASH_BIN = "/nix/var/nix/profiles/default/bin/bash"
@@ -36,6 +37,7 @@ fi
 "$GIT" -c safe.directory=/workspace -C /workspace diff --binary --no-ext-diff --no-textconv HEAD -- > "$PATCH"
 if [ -s "$PATCH" ]; then
     "$GIT" -C "$SNAPSHOT" apply --whitespace=nowarn "$PATCH"
+    "$GIT" -C "$SNAPSHOT" add -A -- .
 fi
 exec "$NIX" --extra-experimental-features "nix-command flakes" --option allow-import-from-derivation false "$@"
 """
@@ -95,7 +97,7 @@ def _bounded(text: str, max_bytes: int) -> tuple[str, bool]:
 
 def _run(argv: list[str], *, timeout: int = 120) -> dict[str, Any]:
     if not argv or argv[0] != str(DOCKER_BIN):
-        raise ValueError("Nixer only executes the fixed Docker client")
+        raise ValueError("Nixer only executes the fixed container client")
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/home/alex",
@@ -117,7 +119,7 @@ def _run(argv: list[str], *, timeout: int = 120) -> dict[str, Any]:
         return {
             "returncode": 127,
             "stdout": "",
-            "stderr": "docker executable unavailable",
+            "stderr": "container client executable unavailable",
             "stdout_truncated": False,
             "stderr_truncated": False,
             "timed_out": False,
@@ -164,6 +166,47 @@ def _resolve_repo(repo: str) -> Path:
     return resolved
 
 
+def _linked_git_common_dir(root: Path) -> Path | None:
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        return None
+    if not dot_git.is_file():
+        raise ValueError("repository .git metadata must be a directory or linked-worktree file")
+
+    raw = dot_git.read_text(encoding="utf-8")
+    if len(raw.encode("utf-8")) > 4096:
+        raise ValueError("linked-worktree .git metadata is too large")
+    lines = raw.splitlines()
+    if len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        raise ValueError("linked-worktree .git metadata is malformed")
+
+    git_dir_value = lines[0][len("gitdir: "):]
+    git_dir_candidate = Path(git_dir_value)
+    if not git_dir_candidate.is_absolute():
+        git_dir_candidate = dot_git.parent / git_dir_candidate
+    git_dir = git_dir_candidate.resolve(strict=True)
+
+    commondir_file = git_dir / "commondir"
+    if not commondir_file.is_file():
+        raise ValueError("linked-worktree Git metadata has no commondir")
+    commondir_raw = commondir_file.read_text(encoding="utf-8").strip()
+    if not commondir_raw or len(commondir_raw.encode("utf-8")) > 4096:
+        raise ValueError("linked-worktree commondir metadata is invalid")
+    common_candidate = Path(commondir_raw)
+    if not common_candidate.is_absolute():
+        common_candidate = git_dir / common_candidate
+    common_dir = common_candidate.resolve(strict=True)
+    if not common_dir.is_dir():
+        raise ValueError("linked-worktree common Git directory is unavailable")
+    try:
+        common_relative = common_dir.relative_to(REPO_ROOT)
+    except ValueError as exc:
+        raise PermissionError("linked-worktree common Git directory is outside /home/alex/repos") from exc
+    if any(not _REPO_PART_RE.fullmatch(part) for part in common_relative.parts):
+        raise PermissionError("linked-worktree Git metadata path contains unsupported characters")
+    return common_dir
+
+
 def _validate_attr_path(value: str, *, field: str) -> str:
     if not isinstance(value, str) or not _ATTR_PATH_RE.fullmatch(value):
         raise ValueError(f"{field} must be a dot-separated Nix attribute path")
@@ -173,10 +216,18 @@ def _validate_attr_path(value: str, *, field: str) -> str:
 
 
 def _backend_probe() -> dict[str, Any]:
+    if not DOCKER_BIN.is_absolute():
+        return {
+            "ready": False,
+            "reason": "container_client_path_not_absolute",
+            "container_client": str(DOCKER_BIN),
+            "expected_image_id": PINNED_NIX_IMAGE_ID,
+        }
     if not DOCKER_BIN.is_file():
         return {
             "ready": False,
-            "reason": "docker_unavailable",
+            "reason": "container_client_unavailable",
+            "container_client": str(DOCKER_BIN),
             "expected_image_id": PINNED_NIX_IMAGE_ID,
         }
     inspected = _run(
@@ -188,6 +239,7 @@ def _backend_probe() -> dict[str, Any]:
         return {
             "ready": False,
             "reason": "pinned_image_unavailable",
+            "container_client": str(DOCKER_BIN),
             "expected_image_id": PINNED_NIX_IMAGE_ID,
             "image_tag_evidence": PINNED_NIX_IMAGE_TAG,
             "image_ref_evidence": PINNED_NIX_IMAGE_REF,
@@ -197,6 +249,7 @@ def _backend_probe() -> dict[str, Any]:
         return {
             "ready": False,
             "reason": "pinned_image_identity_mismatch",
+            "container_client": str(DOCKER_BIN),
             "expected_image_id": PINNED_NIX_IMAGE_ID,
             "actual_image_id": actual,
             "probe": inspected,
@@ -204,6 +257,7 @@ def _backend_probe() -> dict[str, Any]:
     return {
         "ready": True,
         "reason": "ready",
+        "container_client": str(DOCKER_BIN),
         "image_id": actual,
         "image_tag_evidence": PINNED_NIX_IMAGE_TAG,
         "image_ref_evidence": PINNED_NIX_IMAGE_REF,
@@ -212,6 +266,7 @@ def _backend_probe() -> dict[str, Any]:
 
 def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: bool = False) -> dict[str, Any]:
     root = _resolve_repo(repo)
+    git_common_dir = _linked_git_common_dir(root)
     backend = _backend_probe()
     observed_at = _utc_now()
     if not backend["ready"]:
@@ -238,6 +293,11 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         "--security-opt=no-new-privileges",
         "--mount",
         mount,
+    ]
+    if git_common_dir is not None:
+        git_metadata_mount = f"type=bind,src={git_common_dir},dst={git_common_dir},readonly"
+        argv.extend(["--mount", git_metadata_mount])
+    argv.extend([
         "--workdir=/workspace",
         "--entrypoint",
         BASH_BIN,
@@ -246,7 +306,7 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         SNAPSHOT_SCRIPT,
         "nixer-snapshot",
         *nix_args,
-    ]
+    ])
     result = _run(argv)
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -258,12 +318,14 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         "result": result,
         "backend": {
             "image_id": PINNED_NIX_IMAGE_ID,
+            "container_client": str(DOCKER_BIN),
             "entrypoint": BASH_BIN,
             "nix_binary": NIX_BIN,
             "git_binary": GIT_BIN,
             "flake_source": FLAKE_SOURCE,
             "source_mode": "ephemeral-git-snapshot",
             "snapshot_semantics": "Git HEAD plus tracked working-tree diff; untracked files excluded",
+            "linked_worktree_git_metadata": "read-only-common-dir" if git_common_dir else "in-worktree",
             "container_capabilities": ["CHOWN", "DAC_READ_SEARCH"],
             "repository_mount": "read-only",
             "container_persistence": "none (--rm)",
