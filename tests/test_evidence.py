@@ -187,6 +187,28 @@ def test_pump_redacts_yaml_block_scalar_credential() -> None:
     assert live.count("<REDACTED>") >= 3
 
 
+def test_pump_redacts_multiline_plain_yaml_credential_in_flow_mapping() -> None:
+    cases = (
+        b"{password: first-secret\n  second-secret}\nsafe: visible\n",
+        b"[{token: first-secret\n  second-secret}]\nsafe: visible\n",
+        b"{visible: ok, secret: first-secret\n  second-secret}\nsafe: visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in ("first-secret", "second-secret"):
+            assert secret not in detail
+            assert secret not in live
+        assert "safe: visible" in detail
+        assert "safe: visible" in live
+
+
 def test_pump_redacts_inline_multiline_plain_yaml_credential_until_dedent() -> None:
     label = b"pass" + b"word"
     cases = (

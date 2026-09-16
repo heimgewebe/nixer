@@ -187,13 +187,16 @@ class _RedactingLineMirror:
     @staticmethod
     def _secret_inline_plain_value_base_indent(text: str) -> int | None:
         logical = text.rstrip("\r\n")
+        prefix = re.match(r"^(?P<indent>[ \t]*)(?P<sequence>(?:-\s+)+)?", logical)
+        assert prefix is not None
+        remainder = logical[prefix.end() :]
         match = re.search(
-            r"""(?i)^(?P<indent>[ \t]*)(?P<sequence>(?:-\s+)+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*:\s*(?P<value>[^"'|>\s].*)$""",
-            logical,
+            r"""(?i)(?:^|[,{[]\s*)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*:\s*(?P<value>[^"'|>\s].*)$""",
+            remainder,
         )
         if match is None or match.group("value").lstrip().startswith("#"):
             return None
-        return len(match.group("indent")) + len(match.group("sequence") or "")
+        return len(prefix.group("indent")) + len(prefix.group("sequence") or "")
 
     @staticmethod
     def _secret_block_scalar_base_indent(text: str) -> int | None:
