@@ -17,6 +17,7 @@ MAX_FAILURE_DETAIL_BYTES = 32_000
 MAX_LIVE_LOG_LINE_BYTES = 16_384
 MAX_BOOTSPEC_BYTES = 65_536
 _SAFE_BOOTSPEC_V1_PATH_FIELDS = ("kernel", "initrd", "toplevel")
+_STRUCTURED_STORE_PATH_RE = re.compile(r"^/nix/store/[^/\x00-\x20\x7f]+$")
 
 _EVIDENCE_STAGE_FAILURE_RE = re.compile(
     r"(?:^|\n)NIXER_EVIDENCE_STAGE_FAILURE\t([a-z0-9_]+)\t([0-9]{1,3})(?=\n|$)"
@@ -32,7 +33,9 @@ _EVIDENCE_FAILURE_STAGES = frozenset(
         "snapshot_dirty",
         "nix_build",
         "kernel_eval",
+        "kernel_validate",
         "initrd_eval",
+        "initrd_validate",
         "structured_output",
         "path_info",
         "bootspec_size",
@@ -106,15 +109,21 @@ esac
 
 stage=kernel_eval
 kernel_path="$("${nix_base[@]}" eval --raw --no-write-lock-file "$FLAKE#nixosConfigurations.$HOST.config.system.build.kernel.outPath")"
+stage=kernel_validate
+"${nix_base[@]}" path-info --json "$kernel_path" >/dev/null
 stage=initrd_eval
 initrd_path="$("${nix_base[@]}" eval --raw --no-write-lock-file "$FLAKE#nixosConfigurations.$HOST.config.system.build.initialRamdisk.outPath")"
+stage=initrd_validate
+"${nix_base[@]}" path-info --json "$initrd_path" >/dev/null
 
 stage=structured_output
 printf 'NIXER_SOURCE_HEAD\t%s\n' "$source_head"
 printf 'NIXER_SOURCE_DIRTY\t%s\n' "$dirty"
 printf 'NIXER_SYSTEM_PATH\t%s\n' "$system_path"
 printf 'NIXER_KERNEL_PATH\t%s\n' "$kernel_path"
+printf 'NIXER_KERNEL_PATH_VALIDATED\ttrue\n'
 printf 'NIXER_INITRD_PATH\t%s\n' "$initrd_path"
+printf 'NIXER_INITRD_PATH_VALIDATED\ttrue\n'
 printf 'NIXER_PATH_INFO_BEGIN\n'
 stage=path_info
 "${nix_base[@]}" path-info -S --json "$system_path"
@@ -643,6 +652,12 @@ def _field(text: str, name: str) -> str | None:
     return None
 
 
+def _require_structured_store_path(value: str | None, field: str) -> str:
+    if value is None or _STRUCTURED_STORE_PATH_RE.fullmatch(value) is None:
+        raise ValueError(f"{field} is not a validated Nix store path")
+    return value
+
+
 def _parse_path_info(raw: str) -> tuple[int | None, Any]:
     value = json.loads(raw)
     records: list[dict[str, Any]] = []
@@ -941,7 +956,9 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
     stdout = result["stdout"]
     system_path = _field(stdout, "NIXER_SYSTEM_PATH")
     kernel_path = _field(stdout, "NIXER_KERNEL_PATH")
+    kernel_path_validated = _field(stdout, "NIXER_KERNEL_PATH_VALIDATED")
     initrd_path = _field(stdout, "NIXER_INITRD_PATH")
+    initrd_path_validated = _field(stdout, "NIXER_INITRD_PATH_VALIDATED")
     source_head = _field(stdout, "NIXER_SOURCE_HEAD")
     source_dirty = _field(stdout, "NIXER_SOURCE_DIRTY")
     bootspec_path = _field(stdout, "NIXER_BOOTSPEC_PATH") or None
@@ -954,7 +971,9 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         "source_dirty": source_dirty,
         "system_path": system_path,
         "kernel_path": kernel_path,
+        "kernel_path_validated": kernel_path_validated,
         "initrd_path": initrd_path,
+        "initrd_path_validated": initrd_path_validated,
         "path_info": path_info_raw,
     }
     missing = sorted(key for key, value in required.items() if value is None)
@@ -968,6 +987,11 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         )
     assert path_info_raw is not None
     try:
+        if kernel_path_validated != "true" or initrd_path_validated != "true":
+            raise ValueError("kernel/initrd store-path validation marker missing")
+        kernel_path = _require_structured_store_path(kernel_path, "kernel_path")
+        initrd_path = _require_structured_store_path(initrd_path, "initrd_path")
+        system_path = _require_structured_store_path(system_path, "system_path")
         bootspec_size = int(bootspec_size_raw) if bootspec_size_raw is not None else None
         if bootspec_size is not None and bootspec_size < 0:
             raise ValueError("negative boot specification size")
@@ -983,7 +1007,7 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
             size_bytes=bootspec_size,
             omitted_reason=bootspec_omitted,
         )
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
         return _evidence_failure(
             root,
             host_attr,

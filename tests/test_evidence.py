@@ -711,7 +711,9 @@ def test_system_build_success_is_structured(monkeypatch, tmp_path: Path) -> None
             "NIXER_SOURCE_DIRTY\tfalse",
             "NIXER_SYSTEM_PATH\t/nix/store/system",
             "NIXER_KERNEL_PATH\t/nix/store/kernel",
+            "NIXER_KERNEL_PATH_VALIDATED\ttrue",
             "NIXER_INITRD_PATH\t/nix/store/initrd",
+            "NIXER_INITRD_PATH_VALIDATED\ttrue",
             "NIXER_PATH_INFO_BEGIN",
             '[{"path":"/nix/store/system","closureSize":1234,"narSize":100}]',
             "NIXER_PATH_INFO_END",
@@ -1034,6 +1036,8 @@ def test_system_build_script_marks_wrapper_stages() -> None:
         "snapshot_diff",
         "nix_build",
         "kernel_eval",
+        "kernel_validate",
+        "initrd_validate",
         "path_info",
         "bootspec_read",
     ):
@@ -1041,3 +1045,114 @@ def test_system_build_script_marks_wrapper_stages() -> None:
     assert "NIXER_EVIDENCE_STAGE_FAILURE" in evidence.SYSTEM_BUILD_SCRIPT
     assert 'if "$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --; then' in evidence.SYSTEM_BUILD_SCRIPT
     assert "set +e" not in evidence.SYSTEM_BUILD_SCRIPT
+
+
+def test_system_build_rejects_unvalidated_collected_boot_paths(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    secret = "super-secret-must-not-cross-boundary"
+    stdout = "\n".join(
+        [
+            "NIXER_SOURCE_HEAD\t" + "a" * 40,
+            "NIXER_SOURCE_DIRTY\tfalse",
+            "NIXER_SYSTEM_PATH\t/nix/store/system",
+            f"NIXER_KERNEL_PATH\tpassword={secret}",
+            "NIXER_KERNEL_PATH_VALIDATED\ttrue",
+            "NIXER_INITRD_PATH\t/nix/store/initrd",
+            "NIXER_INITRD_PATH_VALIDATED\ttrue",
+            "NIXER_PATH_INFO_BEGIN",
+            '[{"path":"/nix/store/system","closureSize":1}]',
+            "NIXER_PATH_INFO_END",
+            "",
+        ]
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 0,
+            "stdout": stdout,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    serialized = json.dumps(result)
+    assert result["success"] is False
+    assert result["failure"]["class"] == "structured_output_invalid"
+    assert secret not in serialized
+
+
+def test_system_build_requires_boot_path_validation_markers(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    stdout = "\n".join(
+        [
+            "NIXER_SOURCE_HEAD\t" + "a" * 40,
+            "NIXER_SOURCE_DIRTY\tfalse",
+            "NIXER_SYSTEM_PATH\t/nix/store/system",
+            "NIXER_KERNEL_PATH\t/nix/store/kernel",
+            "NIXER_INITRD_PATH\t/nix/store/initrd",
+            "NIXER_PATH_INFO_BEGIN",
+            '[{"path":"/nix/store/system","closureSize":1}]',
+            "NIXER_PATH_INFO_END",
+            "",
+        ]
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 0,
+            "stdout": stdout,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    assert result["success"] is False
+    assert result["failure"]["class"] == "structured_output_invalid"
+
+
+def test_system_build_normalizes_deep_bootspec_recursion(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    deep = '[' * 1100 + '0' + ']' * 1100
+    stdout = "\n".join(
+        [
+            "NIXER_SOURCE_HEAD\t" + "a" * 40,
+            "NIXER_SOURCE_DIRTY\tfalse",
+            "NIXER_SYSTEM_PATH\t/nix/store/system",
+            "NIXER_KERNEL_PATH\t/nix/store/kernel",
+            "NIXER_KERNEL_PATH_VALIDATED\ttrue",
+            "NIXER_INITRD_PATH\t/nix/store/initrd",
+            "NIXER_INITRD_PATH_VALIDATED\ttrue",
+            "NIXER_PATH_INFO_BEGIN",
+            '[{"path":"/nix/store/system","closureSize":1}]',
+            "NIXER_PATH_INFO_END",
+            "NIXER_BOOTSPEC_PATH\t/nix/store/system/boot.json",
+            f"NIXER_BOOTSPEC_SIZE\t{len(deep)}",
+            "NIXER_BOOTSPEC_BEGIN",
+            deep,
+            "NIXER_BOOTSPEC_END",
+            "",
+        ]
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 0,
+            "stdout": stdout,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    assert result["success"] is False
+    assert result["failure"]["class"] == "structured_output_invalid"
