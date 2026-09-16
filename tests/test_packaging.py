@@ -15,6 +15,8 @@ def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     assert 'version = "0.2.0"' in source
     assert 'version = "1.30.0"' in source
     assert "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=" in source
+    assert 'pytestFlags = (old.pytestFlags or [ ]) ++ [ "-n" "0" ];' in source
+    assert '"test_ws_client_exception_handling"' not in source
     assert "cp ${./evidence.py}" in source
     assert '"$out/bin/nixer-evidence"' in source
 

@@ -141,8 +141,13 @@ class _RedactedOutputSink:
 
 
 class _RedactingLineMirror:
-    def __init__(self, mirror: TextIO | _RedactedOutputSink) -> None:
+    def __init__(
+        self,
+        mirror: TextIO | _RedactedOutputSink,
+        state: dict[str, bool] | None = None,
+    ) -> None:
         self.mirror = mirror
+        self.state = state
         self.pending = bytearray()
         self.private_key_block = False
         self.secret_value_continuation = False
@@ -204,6 +209,8 @@ class _RedactingLineMirror:
             if len(self.pending) >= MAX_LIVE_LOG_LINE_BYTES:
                 self.pending.clear()
                 self.disabled = True
+                if self.state is not None:
+                    self.state["truncated"] = True
                 self.mirror.write("<REDACTED_OVERSIZED_LOG_STREAM>\n")
                 self.mirror.flush()
                 return
@@ -233,7 +240,8 @@ def _pump(
                 limit,
                 state,
                 keep_tail=keep_tail,
-            )
+            ),
+            state,
         )
     try:
         while True:
@@ -420,12 +428,17 @@ def _bootspec_summary(
     result["top_level_keys"] = sorted(str(key) for key in value)
     v1 = value.get("org.nixos.bootspec.v1")
     if isinstance(v1, dict):
-        result["v1"] = {
-            key: v1[key]
-            for key in _SAFE_BOOTSPEC_V1_FIELDS
-            if key in v1
-            and (isinstance(v1[key], (str, int, float, bool)) or v1[key] is None)
-        }
+        safe_v1: dict[str, Any] = {}
+        for key in _SAFE_BOOTSPEC_V1_FIELDS:
+            if key not in v1:
+                continue
+            item = v1[key]
+            if not (isinstance(item, (str, int, float, bool)) or item is None):
+                continue
+            if key == "label" and isinstance(item, str):
+                item = server._redact(item)
+            safe_v1[key] = item
+        result["v1"] = safe_v1
     return result
 
 

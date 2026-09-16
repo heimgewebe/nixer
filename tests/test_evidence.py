@@ -120,11 +120,13 @@ def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
 
 def test_redacting_line_mirror_suppresses_oversized_stream() -> None:
     mirror = io.StringIO()
-    redactor = evidence._RedactingLineMirror(mirror)
+    state = {"truncated": False}
+    redactor = evidence._RedactingLineMirror(mirror, state)
     redactor.feed(b"x" * (evidence.MAX_LIVE_LOG_LINE_BYTES + 1))
     redactor.feed(b"\n" + b"to" + b"ken=value-that-must-not-appear\n")
     redactor.finish()
     assert mirror.getvalue() == "<REDACTED_OVERSIZED_LOG_STREAM>\n"
+    assert state["truncated"] is True
 
 
 def test_redacting_line_mirror_suppresses_private_key_block() -> None:
@@ -158,6 +160,7 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     raw = json.dumps(
         {
             "org.nixos.bootspec.v1": {
+                "label": "password=bootspec-secret-value",
                 "kernel": "/nix/store/kernel",
                 "initrd": "/nix/store/initrd",
                 "toplevel": "/nix/store/system",
@@ -171,6 +174,8 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     assert summary["path"] == "/nix/store/system/boot.json"
     assert summary["top_level_keys"] == ["foreign.extension", "org.nixos.bootspec.v1"]
     assert summary["v1"]["kernel"] == "/nix/store/kernel"
+    assert "bootspec-secret-value" not in summary["v1"]["label"]
+    assert "<REDACTED>" in summary["v1"]["label"]
     assert "kernelParams" not in summary["v1"]
     assert "foreign.extension" not in summary
 

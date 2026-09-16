@@ -21,8 +21,13 @@
               version = "1.30.0";
               hash = "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=";
             };
+            # MCP 1.30.0 enables pytest-xdist with an automatic worker count.
+            # Its deprecated WebSocket tests release an ephemeral loopback port
+            # before a child process binds it, so concurrent package checks can
+            # race for that port. Keep the upstream coverage, but run it serially.
+            pytestFlags = (old.pytestFlags or [ ]) ++ [ "-n" "0" ];
             # The real-build backend deliberately runs without SETUID/SETGID.
-            # Consequently Nix builds as container-root; this one upstream test
+            # Consequently Nix builds as container-root; this upstream test
             # assumes chmod(000) is unreadable, which is false for root.
             disabledTests = (old.disabledTests or [ ]) ++ [ "test_permission_error" ];
           });
