@@ -14,6 +14,8 @@ def test_system_build_script_reuses_snapshot_semantics() -> None:
     assert "--option build-users-group \"\"" in evidence.SYSTEM_BUILD_SCRIPT
     assert "--no-link --print-out-paths" in evidence.SYSTEM_BUILD_SCRIPT
     assert "path-info -S --json" in evidence.SYSTEM_BUILD_SCRIPT
+    assert "NIXER_BOOTSPEC_SIZE" in evidence.SYSTEM_BUILD_SCRIPT
+    assert "over_size_limit" in evidence.SYSTEM_BUILD_SCRIPT
 
 
 def test_system_build_argv_is_fixed_and_hardened(tmp_path: Path) -> None:
@@ -52,6 +54,37 @@ def test_pump_redacts_mirrored_output() -> None:
     assert "<REDACTED>" in mirror.getvalue()
 
 
+def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
+    mirror = io.StringIO()
+    redactor = evidence._RedactingLineMirror(mirror)
+    redactor.feed(b"credential=" + b"sk-" + b"proj-" + b"abcdefghijkl")
+    redactor.feed(b"mnopqrstuvwxyz0123456789\n")
+    redactor.finish()
+    assert "sk-" not in mirror.getvalue()
+    assert "<REDACTED>" in mirror.getvalue()
+
+
+def test_redacting_line_mirror_suppresses_oversized_stream() -> None:
+    mirror = io.StringIO()
+    redactor = evidence._RedactingLineMirror(mirror)
+    redactor.feed(b"x" * (evidence.MAX_LIVE_LOG_LINE_BYTES + 1))
+    redactor.feed(b"\n" + b"to" + b"ken=value-that-must-not-appear\n")
+    redactor.finish()
+    assert mirror.getvalue() == "<REDACTED_OVERSIZED_LOG_STREAM>\n"
+
+
+def test_redacting_line_mirror_suppresses_private_key_block() -> None:
+    mirror = io.StringIO()
+    redactor = evidence._RedactingLineMirror(mirror)
+    begin = b"-----BEGIN " + b"PRIVATE KEY-----\n"
+    end = b"-----END " + b"PRIVATE KEY-----\n"
+    redactor.feed(begin + b"key-material-that-must-not-appear\n")
+    redactor.feed(end + b"after\n")
+    redactor.finish()
+    assert "key-material" not in mirror.getvalue()
+    assert "after" in mirror.getvalue()
+
+
 def test_parse_path_info_reads_closure_size() -> None:
     raw = json.dumps(
         [
@@ -79,13 +112,25 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
             "foreign.extension": {"secret": "do-not-return"},
         }
     )
-    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json")
+    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
     assert summary["present"] is True
     assert summary["path"] == "/nix/store/system/boot.json"
     assert summary["top_level_keys"] == ["foreign.extension", "org.nixos.bootspec.v1"]
     assert summary["v1"]["kernel"] == "/nix/store/kernel"
     assert "kernelParams" not in summary["v1"]
     assert "foreign.extension" not in summary
+
+
+def test_bootspec_summary_reports_omitted_oversized_file() -> None:
+    summary = evidence._bootspec_summary(
+        None,
+        "/nix/store/system/boot.json",
+        size_bytes=evidence.MAX_BOOTSPEC_BYTES + 1,
+        omitted_reason="over_size_limit",
+    )
+    assert summary["summary_status"] == "omitted"
+    assert summary["omitted_reason"] == "over_size_limit"
+    assert summary["size_bytes"] == evidence.MAX_BOOTSPEC_BYTES + 1
 
 
 def test_failure_classification() -> None:
@@ -148,6 +193,29 @@ def test_system_build_success_is_structured(monkeypatch, tmp_path: Path) -> None
     assert result["boot"]["bootspec"]["present"] is True
     assert result["backend"]["build_users_group"] == "disabled"
     assert result["backend"]["lifecycle_owner"] == "external operator"
+
+
+def test_system_build_returns_structured_failure_for_oversized_output(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 0,
+            "stdout": "truncated",
+            "stderr": "",
+            "stdout_truncated": True,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    assert result["success"] is False
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == "structured_output_too_large"
 
 
 def test_system_build_failure_preserves_operator_lifecycle(monkeypatch, tmp_path: Path) -> None:

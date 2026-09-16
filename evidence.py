@@ -13,6 +13,8 @@ import server
 EVIDENCE_IDENTITY = "nixer-evidence-v1"
 MAX_STRUCTURED_STDOUT_BYTES = 512_000
 MAX_FAILURE_DETAIL_BYTES = 32_000
+MAX_LIVE_LOG_LINE_BYTES = 16_384
+MAX_BOOTSPEC_BYTES = 65_536
 _SAFE_BOOTSPEC_V1_FIELDS = ("label", "system", "kernel", "initrd", "init", "toplevel")
 
 SYSTEM_BUILD_SCRIPT = r'''set -euo pipefail
@@ -66,12 +68,19 @@ printf 'NIXER_PATH_INFO_BEGIN\n'
 printf '\nNIXER_PATH_INFO_END\n'
 
 if [ -r "$system_path/boot.json" ]; then
+    bootspec_size="$(wc -c < "$system_path/boot.json")"
     printf 'NIXER_BOOTSPEC_PATH\t%s\n' "$system_path/boot.json"
-    printf 'NIXER_BOOTSPEC_BEGIN\n'
-    cat "$system_path/boot.json"
-    printf '\nNIXER_BOOTSPEC_END\n'
+    printf 'NIXER_BOOTSPEC_SIZE\t%s\n' "$bootspec_size"
+    if [ "$bootspec_size" -le 65536 ]; then
+        printf 'NIXER_BOOTSPEC_BEGIN\n'
+        cat "$system_path/boot.json"
+        printf '\nNIXER_BOOTSPEC_END\n'
+    else
+        printf 'NIXER_BOOTSPEC_OMITTED\tover_size_limit\n'
+    fi
 else
     printf 'NIXER_BOOTSPEC_PATH\t\n'
+    printf 'NIXER_BOOTSPEC_SIZE\t\n'
 fi
 '''
 
@@ -103,6 +112,51 @@ def _append_bounded(buffer: bytearray, chunk: bytes, limit: int, *, keep_tail: b
     return truncated
 
 
+class _RedactingLineMirror:
+    def __init__(self, mirror: TextIO) -> None:
+        self.mirror = mirror
+        self.pending = bytearray()
+        self.private_key_block = False
+        self.disabled = False
+
+    @staticmethod
+    def _private_key_marker(text: str, kind: str) -> bool:
+        upper = text.upper()
+        return f"-----{kind} " in upper and "PRIVATE KEY-----" in upper
+
+    def _emit_line(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", errors="replace")
+        begin = self._private_key_marker(text, "BEGIN")
+        end = self._private_key_marker(text, "END")
+        if self.private_key_block or begin:
+            self.mirror.write("<REDACTED_PRIVATE_KEY_BLOCK>\n")
+            self.private_key_block = (self.private_key_block or begin) and not end
+        else:
+            self.mirror.write(server._redact(text))
+        self.mirror.flush()
+
+    def feed(self, raw: bytes) -> None:
+        if self.disabled:
+            return
+        for value in raw:
+            if value == 0x0A:
+                self._emit_line(bytes(self.pending) + b"\n")
+                self.pending.clear()
+                continue
+            if len(self.pending) >= MAX_LIVE_LOG_LINE_BYTES:
+                self.pending.clear()
+                self.disabled = True
+                self.mirror.write("<REDACTED_OVERSIZED_LOG_STREAM>\n")
+                self.mirror.flush()
+                return
+            self.pending.append(value)
+
+    def finish(self) -> None:
+        if not self.disabled and self.pending:
+            self._emit_line(bytes(self.pending))
+            self.pending.clear()
+
+
 def _pump(
     stream: Any,
     buffer: bytearray,
@@ -112,21 +166,18 @@ def _pump(
     mirror: TextIO | None,
     keep_tail: bool,
 ) -> None:
+    redacting_mirror = _RedactingLineMirror(mirror) if mirror is not None else None
     try:
         while True:
             chunk = stream.read(8192)
             if not chunk:
                 break
-            if isinstance(chunk, str):
-                raw = chunk.encode("utf-8", errors="replace")
-                text = chunk
-            else:
-                raw = bytes(chunk)
-                text = raw.decode("utf-8", errors="replace")
+            raw = chunk.encode("utf-8", errors="replace") if isinstance(chunk, str) else bytes(chunk)
             state["truncated"] |= _append_bounded(buffer, raw, limit, keep_tail=keep_tail)
-            if mirror is not None:
-                mirror.write(server._redact(text))
-                mirror.flush()
+            if redacting_mirror is not None:
+                redacting_mirror.feed(raw)
+        if redacting_mirror is not None:
+            redacting_mirror.finish()
     finally:
         stream.close()
 
@@ -270,17 +321,30 @@ def _parse_path_info(raw: str) -> tuple[int | None, Any]:
     return closure_size, value
 
 
-def _bootspec_summary(raw: str | None, path: str | None) -> dict[str, Any]:
-    if not raw or not path:
+def _bootspec_summary(
+    raw: str | None,
+    path: str | None,
+    *,
+    size_bytes: int | None = None,
+    omitted_reason: str | None = None,
+) -> dict[str, Any]:
+    if not path:
         return {"present": False, "path": None}
+    result: dict[str, Any] = {"present": True, "path": path}
+    if size_bytes is not None:
+        result["size_bytes"] = size_bytes
+    if omitted_reason is not None:
+        result["summary_status"] = "omitted"
+        result["omitted_reason"] = omitted_reason
+        return result
+    if raw is None:
+        result["summary_status"] = "unavailable"
+        return result
     value = json.loads(raw)
     if not isinstance(value, dict):
-        return {"present": True, "path": path, "format": "non-object-json"}
-    result: dict[str, Any] = {
-        "present": True,
-        "path": path,
-        "top_level_keys": sorted(str(key) for key in value),
-    }
+        return {**result, "summary_status": "ok", "format": "non-object-json"}
+    result["summary_status"] = "ok"
+    result["top_level_keys"] = sorted(str(key) for key in value)
     v1 = value.get("org.nixos.bootspec.v1")
     if isinstance(v1, dict):
         result["v1"] = {
@@ -321,6 +385,27 @@ def _evidence_backend() -> dict[str, Any]:
         "container_persistence": "none (--rm)",
         "build_users_group": "disabled",
         "lifecycle_owner": "external operator",
+    }
+
+
+def _evidence_failure(
+    repo: Path,
+    host: str,
+    observed_at: str,
+    failure_class: str,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "identity": EVIDENCE_IDENTITY,
+        "operation": "system-build",
+        "repo": str(repo),
+        "host": host,
+        "success": False,
+        "status": "evidence_failed",
+        "backend": _evidence_backend(),
+        "failure": {"class": failure_class, "detail": server._redact(detail)},
+        "observed_at": observed_at,
     }
 
 
@@ -367,7 +452,13 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         }
 
     if result["stdout_truncated"]:
-        raise RuntimeError("structured system-build output exceeded its hard bound")
+        return _evidence_failure(
+            root,
+            host_attr,
+            observed_at,
+            "structured_output_too_large",
+            "structured system-build output exceeded its hard bound",
+        )
     stdout = result["stdout"]
     system_path = _field(stdout, "NIXER_SYSTEM_PATH")
     kernel_path = _field(stdout, "NIXER_KERNEL_PATH")
@@ -375,6 +466,8 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
     source_head = _field(stdout, "NIXER_SOURCE_HEAD")
     source_dirty = _field(stdout, "NIXER_SOURCE_DIRTY")
     bootspec_path = _field(stdout, "NIXER_BOOTSPEC_PATH") or None
+    bootspec_size_raw = _field(stdout, "NIXER_BOOTSPEC_SIZE") or None
+    bootspec_omitted = _field(stdout, "NIXER_BOOTSPEC_OMITTED") or None
     path_info_raw = _section(stdout, "NIXER_PATH_INFO_BEGIN", "NIXER_PATH_INFO_END")
     bootspec_raw = _section(stdout, "NIXER_BOOTSPEC_BEGIN", "NIXER_BOOTSPEC_END")
     required = {
@@ -387,9 +480,33 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
     }
     missing = sorted(key for key, value in required.items() if value is None)
     if missing:
-        raise RuntimeError(f"system-build output is missing structured fields: {', '.join(missing)}")
+        return _evidence_failure(
+            root,
+            host_attr,
+            observed_at,
+            "structured_output_invalid",
+            f"system-build output is missing structured fields: {', '.join(missing)}",
+        )
     assert path_info_raw is not None
-    closure_size, path_info = _parse_path_info(path_info_raw)
+    try:
+        bootspec_size = int(bootspec_size_raw) if bootspec_size_raw is not None else None
+        if bootspec_size is not None and bootspec_size < 0:
+            raise ValueError("negative boot specification size")
+        closure_size, path_info = _parse_path_info(path_info_raw)
+        bootspec = _bootspec_summary(
+            bootspec_raw,
+            bootspec_path,
+            size_bytes=bootspec_size,
+            omitted_reason=bootspec_omitted,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return _evidence_failure(
+            root,
+            host_attr,
+            observed_at,
+            "structured_output_invalid",
+            f"could not parse structured system-build output: {exc}",
+        )
 
     return {
         "schema_version": 1,
@@ -412,7 +529,7 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         "boot": {
             "kernel": kernel_path,
             "initrd": initrd_path,
-            "bootspec": _bootspec_summary(bootspec_raw, bootspec_path),
+            "bootspec": bootspec,
         },
         "backend": _evidence_backend(),
         "observed_at": observed_at,
