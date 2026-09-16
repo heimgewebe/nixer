@@ -185,19 +185,27 @@ class _RedactingLineMirror:
     @staticmethod
     def _find_unescaped_quote(text: str, quote: str) -> int | None:
         escaped = False
-        for index, char in enumerate(text):
+        index = 0
+        while index < len(text):
+            char = text[index]
             if escaped:
                 escaped = False
+                index += 1
                 continue
             if char == "\\":
                 escaped = True
+                index += 1
                 continue
             if char == quote:
+                if quote == "'" and index + 1 < len(text) and text[index + 1] == quote:
+                    index += 2
+                    continue
                 return index
+            index += 1
         return None
 
     @classmethod
-    def _secret_quoted_value_start(cls, text: str) -> str | None:
+    def _secret_quoted_value(cls, text: str) -> tuple[str, str | None] | None:
         logical = text.rstrip("\r\n")
         match = re.search(
             r'''(?i)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*(?P<value_quote>["'])''',
@@ -206,9 +214,10 @@ class _RedactingLineMirror:
         if match is None:
             return None
         quote = match.group("value_quote")
-        if cls._find_unescaped_quote(logical[match.end() :], quote) is not None:
-            return None
-        return quote
+        closing = cls._find_unescaped_quote(logical[match.end() :], quote)
+        if closing is None:
+            return quote, None
+        return quote, logical[match.end() + closing + 1 :]
 
     @staticmethod
     def _line_ending(text: str) -> str:
@@ -266,15 +275,20 @@ class _RedactingLineMirror:
                 self.mirror.write(ending)
         else:
             block_scalar_indent = self._secret_block_scalar_base_indent(text)
-            quoted_value = self._secret_quoted_value_start(text)
+            quoted_value = self._secret_quoted_value(text)
             if block_scalar_indent is not None:
                 self.mirror.write("<REDACTED>" + ending)
                 self.secret_block_scalar_base_indent = block_scalar_indent
                 self.secret_quoted_value_quote = None
                 self.secret_value_continuation = False
             elif quoted_value is not None:
-                self.mirror.write("<REDACTED>" + ending)
-                self.secret_quoted_value_quote = quoted_value
+                quote, suffix = quoted_value
+                self.mirror.write(
+                    "<REDACTED>"
+                    + (server._redact(suffix) if suffix is not None else "")
+                    + ending
+                )
+                self.secret_quoted_value_quote = quote if suffix is None else None
                 self.secret_value_continuation = False
             elif self._secret_label_without_value(text):
                 self.mirror.write("<REDACTED>" + ending)

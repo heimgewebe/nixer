@@ -94,6 +94,33 @@ def test_pump_redacts_quoted_credential_key() -> None:
     assert "<REDACTED>" in live
 
 
+def test_pump_redacts_yaml_single_quoted_credential_with_doubled_quote() -> None:
+    label = b"pass" + b"word"
+    cases = (
+        label + b": 'correct horse''s battery staple' suffix-visible\n",
+        b"  - '" + label + b"': 'correct horse''s battery staple' suffix-visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload + b"safe: visible\n")
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret_fragment in ("correct horse", "battery staple"):
+            assert secret_fragment not in detail
+            assert secret_fragment not in live
+        for visible in ("suffix-visible", "safe: visible"):
+            assert visible in detail
+            assert visible in live
+        assert "<REDACTED>" in detail
+        assert "<REDACTED>" in live
+
+
 def test_pump_redacts_multiline_quoted_credential_value() -> None:
     label = b"pass" + b"word"
     stream = io.BytesIO(label + b'= "correct\nhorse battery staple" suffix\n')
