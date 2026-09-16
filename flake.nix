@@ -21,6 +21,20 @@
               version = "1.30.0";
               hash = "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=";
             };
+            # The upstream SSE/WebSocket fixtures briefly release an ephemeral
+            # 127.0.0.1 port before their child Uvicorn process binds it. In the
+            # real system build, unrelated concurrent derivations share loopback
+            # and can claim that port. Keep the transport tests, but isolate only
+            # these listeners on a package-specific loopback alias and teach their
+            # shared readiness helper to probe that explicit host.
+            postPatch = (old.postPatch or "") + ''
+              substituteInPlace tests/test_helpers.py \
+                --replace-fail 'def wait_for_server(port: int, timeout: float = 20.0) -> None:' 'def wait_for_server(port: int, timeout: float = 20.0, host: str = "127.0.0.1") -> None:' \
+                --replace-fail 's.connect(("127.0.0.1", port))' 's.connect((host, port))'
+              substituteInPlace tests/shared/test_sse.py tests/shared/test_ws.py \
+                --replace-fail '127.0.0.1' '127.0.0.2' \
+                --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
+            '';
             # MCP 1.30.0 enables pytest-xdist with an automatic worker count.
             # Its deprecated WebSocket tests release an ephemeral loopback port
             # before a child process binds it, so concurrent package checks can
