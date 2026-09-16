@@ -83,15 +83,15 @@ if [ -s "$PATCH" ]; then
 fi
 
 stage=snapshot_dirty
-set +e
-"$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --
-dirty_rc="$?"
-set -e
-case "$dirty_rc" in
-    0) dirty=false ;;
-    1) dirty=true ;;
-    *) stage_fail_code "$dirty_rc" ;;
-esac
+if "$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --; then
+    dirty=false
+else
+    dirty_rc="$?"
+    case "$dirty_rc" in
+        1) dirty=true ;;
+        *) stage_fail_code "$dirty_rc" ;;
+    esac
+fi
 
 # Real builds run as root inside the already capability-reduced disposable
 # container. Disabling Nix build-user switching avoids granting SETUID/SETGID.

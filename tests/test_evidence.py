@@ -978,3 +978,5 @@ def test_system_build_script_marks_wrapper_stages() -> None:
     ):
         assert f"stage={stage}" in evidence.SYSTEM_BUILD_SCRIPT
     assert "NIXER_EVIDENCE_STAGE_FAILURE" in evidence.SYSTEM_BUILD_SCRIPT
+    assert 'if "$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --; then' in evidence.SYSTEM_BUILD_SCRIPT
+    assert "set +e" not in evidence.SYSTEM_BUILD_SCRIPT
