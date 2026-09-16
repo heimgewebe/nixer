@@ -187,6 +187,38 @@ def test_pump_redacts_yaml_block_scalar_credential() -> None:
     assert live.count("<REDACTED>") >= 3
 
 
+def test_pump_redacts_multiline_plain_yaml_credential_value_until_dedent() -> None:
+    label = b"pass" + b"word"
+    cases = (
+        label + b":\n  first-secret-line\n  second-secret-line\nsafe: visible\n",
+        b"  - " + label + b":\n      list-secret-one\n      list-secret-two\n    safe: visible\n  - next: visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in (
+            "first-secret-line",
+            "second-secret-line",
+            "list-secret-one",
+            "list-secret-two",
+        ):
+            assert secret not in detail
+            assert secret not in live
+        assert "safe: visible" in detail
+        assert "safe: visible" in live
+        if b"next: visible" in payload:
+            assert "next: visible" in detail
+            assert "next: visible" in live
+
+
 def test_pump_redacts_yaml_block_scalar_with_modifiers() -> None:
     key = b'"' + b"pass" + b"word" + b'"'
     stream = io.BytesIO(
@@ -207,6 +239,38 @@ def test_pump_redacts_yaml_block_scalar_with_modifiers() -> None:
     assert "safe: visible" in live
     assert detail.count("<REDACTED>") >= 3
     assert live.count("<REDACTED>") >= 3
+
+
+def test_pump_redacts_yaml_block_scalar_with_node_properties() -> None:
+    label = b"pass" + b"word"
+    cases = (
+        label + b": &shared |\n  anchor-secret-one\n  anchor-secret-two\nsafe: visible\n",
+        b"token: !vault >-\n  tag-secret-one\n  tag-secret-two\nsafe: visible\n",
+        b"secret: !!str &shared |2-\n  combined-secret-one\n  combined-secret-two\nsafe: visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in (
+            "anchor-secret-one",
+            "anchor-secret-two",
+            "tag-secret-one",
+            "tag-secret-two",
+            "combined-secret-one",
+            "combined-secret-two",
+        ):
+            assert secret not in detail
+            assert secret not in live
+        assert "safe: visible" in detail
+        assert "safe: visible" in live
 
 
 def test_pump_redacts_yaml_sequence_block_scalar_credential() -> None:
@@ -338,6 +402,31 @@ def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
     redactor.finish()
     assert "sk-" not in mirror.getvalue()
     assert "<REDACTED>" in mirror.getvalue()
+
+
+def test_redacting_line_mirror_redacts_yaml_node_properties_across_chunks() -> None:
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+    sink = evidence._RedactedOutputSink(mirror, captured, 4096, state, keep_tail=True)
+    redactor = evidence._RedactingLineMirror(sink, state)
+
+    for chunk in (
+        b"password: &sha",
+        b"red |\n  first-se",
+        b"cret\n  second-secret\nsa",
+        b"fe: visible\n",
+    ):
+        redactor.feed(chunk)
+    redactor.finish()
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    for secret in ("first-secret", "second-secret"):
+        assert secret not in detail
+        assert secret not in live
+    assert "safe: visible" in detail
+    assert "safe: visible" in live
 
 
 def test_redacting_line_mirror_preserves_split_crlf_boundaries() -> None:
