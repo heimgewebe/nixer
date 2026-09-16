@@ -16,7 +16,7 @@ MAX_STRUCTURED_STDOUT_BYTES = 512_000
 MAX_FAILURE_DETAIL_BYTES = 32_000
 MAX_LIVE_LOG_LINE_BYTES = 16_384
 MAX_BOOTSPEC_BYTES = 65_536
-_SAFE_BOOTSPEC_V1_FIELDS = ("system", "kernel", "initrd", "init", "toplevel")
+_SAFE_BOOTSPEC_V1_PATH_FIELDS = ("kernel", "initrd", "toplevel")
 
 _EVIDENCE_STAGE_FAILURE_RE = re.compile(
     r"(?:^|\n)NIXER_EVIDENCE_STAGE_FAILURE\t([a-z0-9_]+)\t([0-9]{1,3})(?=\n|$)"
@@ -668,6 +668,7 @@ def _bootspec_summary(
     raw: str | None,
     path: str | None,
     *,
+    verified_v1_paths: dict[str, str] | None = None,
     size_bytes: int | None = None,
     omitted_reason: str | None = None,
 ) -> dict[str, Any]:
@@ -689,12 +690,12 @@ def _bootspec_summary(
     result["summary_status"] = "ok"
     v1 = value.get("org.nixos.bootspec.v1")
     if isinstance(v1, dict):
-        safe_v1: dict[str, Any] = {}
-        for key in _SAFE_BOOTSPEC_V1_FIELDS:
-            if key not in v1:
-                continue
-            item = v1[key]
-            if not (isinstance(item, (str, int, float, bool)) or item is None):
+        safe_v1: dict[str, str] = {}
+        verified = verified_v1_paths or {}
+        for key in _SAFE_BOOTSPEC_V1_PATH_FIELDS:
+            expected = verified.get(key)
+            item = v1.get(key)
+            if expected is None or not isinstance(item, str) or item != expected:
                 continue
             safe_v1[key] = item
         result["v1"] = safe_v1
@@ -974,6 +975,11 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
         bootspec = _bootspec_summary(
             bootspec_raw,
             bootspec_path,
+            verified_v1_paths={
+                "kernel": kernel_path,
+                "initrd": initrd_path,
+                "toplevel": system_path,
+            },
             size_bytes=bootspec_size,
             omitted_reason=bootspec_omitted,
         )

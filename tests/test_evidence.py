@@ -568,7 +568,16 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
             "foreign.extension": {"secret": "do-not-return"},
         }
     )
-    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
+    summary = evidence._bootspec_summary(
+        raw,
+        "/nix/store/system/boot.json",
+        verified_v1_paths={
+            "kernel": "/nix/store/kernel",
+            "initrd": "/nix/store/initrd",
+            "toplevel": "/nix/store/system",
+        },
+        size_bytes=len(raw),
+    )
     assert summary["present"] is True
     assert summary["path"] == "/nix/store/system/boot.json"
     assert "top_level_keys" not in summary
@@ -590,7 +599,16 @@ def test_bootspec_summary_omits_yaml_doubled_quote_label() -> None:
         }
     )
 
-    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
+    summary = evidence._bootspec_summary(
+        raw,
+        "/nix/store/system/boot.json",
+        verified_v1_paths={
+            "kernel": "/nix/store/kernel",
+            "initrd": "/nix/store/initrd",
+            "toplevel": "/nix/store/system",
+        },
+        size_bytes=len(raw),
+    )
 
     assert "label" not in summary["v1"]
     assert secret not in json.dumps(summary)
@@ -606,11 +624,54 @@ def test_bootspec_summary_omits_arbitrary_top_level_keys() -> None:
         }
     )
 
-    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
+    summary = evidence._bootspec_summary(
+        raw,
+        "/nix/store/system/boot.json",
+        verified_v1_paths={
+            "kernel": "/nix/store/kernel",
+            "initrd": "/nix/store/initrd",
+            "toplevel": "/nix/store/system",
+        },
+        size_bytes=len(raw),
+    )
 
     assert "top_level_keys" not in summary
     assert summary["v1"]["kernel"] == "/nix/store/kernel"
     assert secret_key not in json.dumps(summary)
+
+
+def test_bootspec_summary_rejects_unverified_whitelisted_values() -> None:
+    secret = "super-secret-that-must-not-cross-boundary"
+    raw = json.dumps(
+        {
+            "org.nixos.bootspec.v1": {
+                "system": f"password={secret}",
+                "init": f"/nix/store/fake-{secret}",
+                "kernel": f"password={secret}",
+                "initrd": "/nix/store/initrd",
+                "toplevel": "/nix/store/system",
+            }
+        }
+    )
+
+    summary = evidence._bootspec_summary(
+        raw,
+        "/nix/store/system/boot.json",
+        verified_v1_paths={
+            "kernel": "/nix/store/kernel",
+            "initrd": "/nix/store/initrd",
+            "toplevel": "/nix/store/system",
+        },
+        size_bytes=len(raw),
+    )
+    serialized = json.dumps(summary)
+
+    assert secret not in serialized
+    assert "system" not in summary["v1"]
+    assert "init" not in summary["v1"]
+    assert "kernel" not in summary["v1"]
+    assert summary["v1"]["initrd"] == "/nix/store/initrd"
+    assert summary["v1"]["toplevel"] == "/nix/store/system"
 
 
 def test_bootspec_summary_reports_omitted_oversized_file() -> None:
