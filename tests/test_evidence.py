@@ -844,9 +844,11 @@ def test_system_build_failure_suppresses_freeform_diagnostics(monkeypatch, tmp_p
         evidence,
         "_run_streaming",
         lambda _argv: {
-            "returncode": 1,
+            "returncode": 88,
             "stdout": "",
             "failure_class": "derivation_failed",
+            "failure_stage": "nix_build",
+            "stage_exit_code": 1,
             "stderr": "password=secret-that-must-never-cross-boundary",
             "stdout_truncated": False,
             "stderr_truncated": True,
@@ -870,9 +872,11 @@ def test_system_build_failure_preserves_operator_lifecycle(monkeypatch, tmp_path
         evidence,
         "_run_streaming",
         lambda _argv: {
-            "returncode": 1,
+            "returncode": 88,
             "stdout": "",
             "failure_class": "derivation_failed",
+            "failure_stage": "nix_build",
+            "stage_exit_code": 1,
             "stdout_truncated": False,
             "stderr_truncated": False,
         },
@@ -884,3 +888,93 @@ def test_system_build_failure_preserves_operator_lifecycle(monkeypatch, tmp_path
     assert result["failure"]["class"] == "derivation_failed"
     assert result["backend"]["build_users_group"] == "disabled"
     assert result["backend"]["lifecycle_owner"] == "external operator"
+
+
+def test_parse_stage_failure_uses_last_whitelisted_marker() -> None:
+    stderr = (
+        "NIXER_EVIDENCE_STAGE_FAILURE\tforged_stage\t9\n"
+        "noise\n"
+        "NIXER_EVIDENCE_STAGE_FAILURE\tpath_info\t5\n"
+    )
+    assert evidence._parse_stage_failure(stderr) == ("path_info", 5)
+
+
+@pytest.mark.parametrize(
+    ("stage", "stage_exit_code", "status"),
+    [
+        ("nix_build", 1, "build_failed"),
+        ("snapshot_clone", 128, "evidence_failed"),
+        ("path_info", 1, "evidence_failed"),
+        ("bootspec_read", 1, "evidence_failed"),
+    ],
+)
+def test_system_build_distinguishes_stage_failures(
+    monkeypatch, tmp_path: Path, stage: str, stage_exit_code: int, status: str
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 88,
+            "stdout": "",
+            "failure_class": "derivation_failed" if stage == "nix_build" else None,
+            "failure_stage": stage,
+            "stage_exit_code": stage_exit_code,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    assert result["success"] is False
+    assert result["status"] == status
+    if stage == "nix_build":
+        assert result["failure"]["class"] == "derivation_failed"
+        assert result["failure"]["nix_exit_code"] == stage_exit_code
+        assert "adapter_exit_code" not in result["failure"]
+    else:
+        assert result["failure"]["class"] == "adapter_stage_failed"
+        assert result["failure"]["adapter_stage"] == stage
+        assert result["failure"]["adapter_exit_code"] == stage_exit_code
+        assert "nix_exit_code" not in result["failure"]
+
+
+def test_system_build_unclassified_wrapper_exit_is_not_a_nix_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 42,
+            "stdout": "",
+            "failure_class": "nix_build_failed",
+            "failure_stage": None,
+            "stage_exit_code": None,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == "unclassified_container_exit"
+    assert result["failure"]["container_exit_code"] == 42
+    assert "nix_exit_code" not in result["failure"]
+
+
+def test_system_build_script_marks_wrapper_stages() -> None:
+    for stage in (
+        "snapshot_clone",
+        "snapshot_diff",
+        "nix_build",
+        "kernel_eval",
+        "path_info",
+        "bootspec_read",
+    ):
+        assert f"stage={stage}" in evidence.SYSTEM_BUILD_SCRIPT
+    assert "NIXER_EVIDENCE_STAGE_FAILURE" in evidence.SYSTEM_BUILD_SCRIPT

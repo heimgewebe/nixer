@@ -18,6 +18,28 @@ MAX_LIVE_LOG_LINE_BYTES = 16_384
 MAX_BOOTSPEC_BYTES = 65_536
 _SAFE_BOOTSPEC_V1_FIELDS = ("system", "kernel", "initrd", "init", "toplevel")
 
+_EVIDENCE_STAGE_FAILURE_RE = re.compile(
+    r"(?:^|\n)NIXER_EVIDENCE_STAGE_FAILURE\t([a-z0-9_]+)\t([0-9]{1,3})(?=\n|$)"
+)
+_EVIDENCE_FAILURE_STAGES = frozenset(
+    {
+        "snapshot_clone",
+        "source_head",
+        "snapshot_head",
+        "snapshot_diff",
+        "snapshot_apply",
+        "snapshot_index",
+        "snapshot_dirty",
+        "nix_build",
+        "kernel_eval",
+        "initrd_eval",
+        "structured_output",
+        "path_info",
+        "bootspec_size",
+        "bootspec_read",
+    }
+)
+
 SYSTEM_BUILD_SCRIPT = r'''set -euo pipefail
 umask 077
 GIT=/nix/var/nix/profiles/default/bin/git
@@ -26,60 +48,96 @@ SNAPSHOT=/tmp/nixer-workspace
 PATCH=/tmp/nixer-worktree.patch
 HOST="$1"
 FLAKE="git+file://$SNAPSHOT"
+stage=bootstrap
 
+stage_fail_code() {
+    failure_rc="$1"
+    trap - ERR
+    printf '\nNIXER_EVIDENCE_STAGE_FAILURE\t%s\t%s\n' "$stage" "$failure_rc" >&2
+    exit 88
+}
+
+stage_fail() {
+    failure_rc="$?"
+    stage_fail_code "$failure_rc"
+}
+trap stage_fail ERR
+
+stage=snapshot_clone
 "$GIT" -c safe.directory=/workspace clone --no-local --no-hardlinks /workspace "$SNAPSHOT" >/dev/null
+stage=source_head
 source_head="$("$GIT" -c safe.directory=/workspace -C /workspace rev-parse HEAD)"
+stage=snapshot_head
 snapshot_head="$("$GIT" -C "$SNAPSHOT" rev-parse HEAD)"
 if [ "$source_head" != "$snapshot_head" ]; then
     printf 'Nixer snapshot HEAD mismatch\n' >&2
     exit 86
 fi
+stage=snapshot_diff
 "$GIT" -c safe.directory=/workspace -C /workspace diff --binary --no-ext-diff --no-textconv HEAD -- > "$PATCH"
 if [ -s "$PATCH" ]; then
+    stage=snapshot_apply
     "$GIT" -C "$SNAPSHOT" apply --whitespace=nowarn "$PATCH"
+    stage=snapshot_index
     "$GIT" -C "$SNAPSHOT" add -A -- .
 fi
 
-if "$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --; then
-    dirty=false
-else
-    dirty=true
-fi
+stage=snapshot_dirty
+set +e
+"$GIT" -C "$SNAPSHOT" diff-index --quiet HEAD --
+dirty_rc="$?"
+set -e
+case "$dirty_rc" in
+    0) dirty=false ;;
+    1) dirty=true ;;
+    *) stage_fail_code "$dirty_rc" ;;
+esac
 
 # Real builds run as root inside the already capability-reduced disposable
 # container. Disabling Nix build-user switching avoids granting SETUID/SETGID.
 nix_base=("$NIX" --extra-experimental-features "nix-command flakes" --option allow-import-from-derivation false --option build-users-group "")
 installable="$FLAKE#nixosConfigurations.$HOST.config.system.build.toplevel"
+stage=nix_build
 system_path="$("${nix_base[@]}" build --no-link --print-out-paths --no-write-lock-file "$installable")"
 case "$system_path" in
     /nix/store/*) ;;
     *) printf 'Nixer system-build returned an invalid output path\n' >&2; exit 87 ;;
 esac
 
+stage=kernel_eval
 kernel_path="$("${nix_base[@]}" eval --raw --no-write-lock-file "$FLAKE#nixosConfigurations.$HOST.config.system.build.kernel.outPath")"
+stage=initrd_eval
 initrd_path="$("${nix_base[@]}" eval --raw --no-write-lock-file "$FLAKE#nixosConfigurations.$HOST.config.system.build.initialRamdisk.outPath")"
 
+stage=structured_output
 printf 'NIXER_SOURCE_HEAD\t%s\n' "$source_head"
 printf 'NIXER_SOURCE_DIRTY\t%s\n' "$dirty"
 printf 'NIXER_SYSTEM_PATH\t%s\n' "$system_path"
 printf 'NIXER_KERNEL_PATH\t%s\n' "$kernel_path"
 printf 'NIXER_INITRD_PATH\t%s\n' "$initrd_path"
 printf 'NIXER_PATH_INFO_BEGIN\n'
+stage=path_info
 "${nix_base[@]}" path-info -S --json "$system_path"
+stage=structured_output
 printf '\nNIXER_PATH_INFO_END\n'
 
 if [ -r "$system_path/boot.json" ]; then
+    stage=bootspec_size
     bootspec_size="$(wc -c < "$system_path/boot.json")"
+    stage=structured_output
     printf 'NIXER_BOOTSPEC_PATH\t%s\n' "$system_path/boot.json"
     printf 'NIXER_BOOTSPEC_SIZE\t%s\n' "$bootspec_size"
     if [ "$bootspec_size" -le 65536 ]; then
         printf 'NIXER_BOOTSPEC_BEGIN\n'
+        stage=bootspec_read
         cat "$system_path/boot.json"
+        stage=structured_output
         printf '\nNIXER_BOOTSPEC_END\n'
     else
         printf 'NIXER_BOOTSPEC_OMITTED\tover_size_limit\n'
     fi
 else
+    stage=structured_output
     printf 'NIXER_BOOTSPEC_PATH\t\n'
     printf 'NIXER_BOOTSPEC_SIZE\t\n'
 fi
@@ -506,12 +564,21 @@ def _run_streaming(argv: list[str]) -> dict[str, Any]:
 
     stdout = stdout_buffer.decode("utf-8", errors="replace")
     stderr_internal = stderr_buffer.decode("utf-8", errors="replace")
+    stage_failure = _parse_stage_failure(stderr_internal) if returncode == 88 else None
+    failure_stage = stage_failure[0] if stage_failure is not None else None
+    stage_exit_code = stage_failure[1] if stage_failure is not None else None
+    if failure_stage == "nix_build" and stage_exit_code is not None:
+        failure_class = _classify_failure(stderr_internal, stage_exit_code)
+    elif returncode != 0 and stage_failure is None:
+        failure_class = _classify_failure(stderr_internal, returncode)
+    else:
+        failure_class = None
     return {
         "returncode": returncode,
         "stdout": stdout,
-        "failure_class": (
-            _classify_failure(stderr_internal, returncode) if returncode != 0 else None
-        ),
+        "failure_class": failure_class,
+        "failure_stage": failure_stage,
+        "stage_exit_code": stage_exit_code,
         "stdout_truncated": stdout_state["truncated"],
         "stderr_truncated": stderr_state["truncated"],
     }
@@ -634,10 +701,18 @@ def _bootspec_summary(
     return result
 
 
+
+def _parse_stage_failure(stderr: str) -> tuple[str, int] | None:
+    matches = list(_EVIDENCE_STAGE_FAILURE_RE.finditer(stderr))
+    for match in reversed(matches):
+        stage = match.group(1)
+        returncode = int(match.group(2))
+        if stage in _EVIDENCE_FAILURE_STAGES and 1 <= returncode <= 255:
+            return stage, returncode
+    return None
+
 def _classify_failure(stderr: str, returncode: int) -> str:
     lowered = stderr.lower()
-    if returncode == 127:
-        return "container_client_unavailable"
     if "no space left on device" in lowered or "disk quota exceeded" in lowered:
         return "disk_exhausted"
     if "hash mismatch" in lowered:
@@ -796,7 +871,9 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
             },
             "observed_at": observed_at,
         }
-    if result["returncode"] != 0:
+    failure_stage = result.get("failure_stage")
+    stage_exit_code = result.get("stage_exit_code")
+    if failure_stage == "nix_build" and stage_exit_code is not None:
         return {
             "schema_version": 1,
             "identity": EVIDENCE_IDENTITY,
@@ -808,8 +885,45 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
             "backend": _evidence_backend(),
             "failure": {
                 "class": result["failure_class"] or "nix_build_failed",
-                "nix_exit_code": result["returncode"],
+                "nix_exit_code": stage_exit_code,
                 "detail": "build diagnostics suppressed by evidence boundary",
+                "detail_truncated": result["stderr_truncated"],
+            },
+            "observed_at": observed_at,
+        }
+    if failure_stage is not None and stage_exit_code is not None:
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": {
+                "class": "adapter_stage_failed",
+                "adapter_stage": failure_stage,
+                "adapter_exit_code": stage_exit_code,
+                "detail": "evidence adapter stage failed",
+                "detail_truncated": result["stderr_truncated"],
+            },
+            "observed_at": observed_at,
+        }
+    if result["returncode"] != 0:
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": {
+                "class": "unclassified_container_exit",
+                "container_exit_code": result["returncode"],
+                "detail": "containerized evidence wrapper exited without a stage marker",
                 "detail_truncated": result["stderr_truncated"],
             },
             "observed_at": observed_at,
