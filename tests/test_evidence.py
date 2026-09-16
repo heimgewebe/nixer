@@ -23,8 +23,12 @@ def test_system_build_argv_is_fixed_and_hardened(tmp_path: Path) -> None:
     assert argv[0] == str(evidence.server.DOCKER_BIN)
     assert "--pull=never" in argv
     assert "--cap-drop=ALL" in argv
+    assert "--cap-add=CHOWN" in argv
+    assert "--cap-add=DAC_READ_SEARCH" in argv
+    assert "--cap-add=FOWNER" in argv
     assert "--cap-add=SETUID" not in argv
     assert "--cap-add=SETGID" not in argv
+    assert "--cap-add=DAC_OVERRIDE" not in argv
     assert "--security-opt=no-new-privileges" in argv
     assert evidence.server.PINNED_NIX_IMAGE_ID in argv
     assert argv[-1] == "heim-pc"

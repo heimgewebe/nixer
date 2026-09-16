@@ -253,6 +253,7 @@ def _system_build_argv(root: Path, git_common_dir: Path | None, host: str) -> li
         "--cap-drop=ALL",
         "--cap-add=CHOWN",
         "--cap-add=DAC_READ_SEARCH",
+        "--cap-add=FOWNER",
         "--security-opt=no-new-privileges",
         "--mount",
         mount,

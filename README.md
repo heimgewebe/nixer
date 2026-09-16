@@ -82,7 +82,7 @@ nixer-evidence system-build --repo /path/to/repo --host heim-pc
 
 `system-build` ist fest auf `nixosConfigurations.<host>.config.system.build.toplevel` gebunden. Es gibt keinen freien Nix-Ausdruck, kein beliebiges Nix-ARGV und kein beliebiges Containerkommando. Der Adapter verwendet dieselbe read-only Snapshot-Semantik und dasselbe gepinnte Nix-Image wie MCP v0, realisiert den System-Toplevel im flüchtigen Container-Store und gibt ein strukturiertes JSON-Ergebnis zurück.
 
-Für Realisierungen bleibt die Container-Capability-Menge unverändert klein: `SETUID`/`SETGID` werden nicht ergänzt. Stattdessen läuft Nix im Wegwerfcontainer mit deaktivierter Build-User-Umschaltung (`build-users-group = ""`); Derivations laufen damit als Container-root, weiterhin ohne Docker-Socket, ohne beschreibbaren Repo-Mount und unter der bestehenden Capability-Reduktion.
+Für Realisierungen bleibt die Container-Capability-Menge eng: `SETUID`, `SETGID` und `DAC_OVERRIDE` werden nicht ergänzt. Der Evidence-Container erhält zusätzlich zu `CHOWN` und `DAC_READ_SEARCH` ausschließlich `FOWNER`, weil Nix Buildverzeichnisse an numerische Build-UIDs übergibt und anschließend deren Modus anpasst; ohne `FOWNER` endet dieser reale NixOS-Buildpfad mit `chmod: Operation not permitted`. Nix läuft zugleich mit deaktivierter Build-User-Umschaltung (`build-users-group = ""`), weiterhin ohne Docker-Socket und ohne beschreibbaren Repo-Mount. MCP v0 behält seine kleinere Capability-Menge ohne `FOWNER`.
 
 Die Ausgabe enthält insbesondere:
 
