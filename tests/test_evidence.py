@@ -58,6 +58,21 @@ def test_pump_redacts_mirrored_output() -> None:
     assert "<REDACTED>" in mirror.getvalue()
 
 
+def test_pump_redacts_structured_tail_before_eviction() -> None:
+    stream = io.BytesIO(b"x" * 64 + b" password=super-secret-value\n")
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 24, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    assert state["truncated"] is True
+    assert "super-secret-value" not in detail
+    assert "<REDACTED>" in detail
+    assert "super-secret-value" not in mirror.getvalue()
+
+
 def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
     mirror = io.StringIO()
     redactor = evidence._RedactingLineMirror(mirror)

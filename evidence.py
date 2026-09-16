@@ -112,8 +112,35 @@ def _append_bounded(buffer: bytearray, chunk: bytes, limit: int, *, keep_tail: b
     return truncated
 
 
+class _RedactedOutputSink:
+    def __init__(
+        self,
+        mirror: TextIO,
+        buffer: bytearray,
+        limit: int,
+        state: dict[str, bool],
+        *,
+        keep_tail: bool,
+    ) -> None:
+        self.mirror = mirror
+        self.buffer = buffer
+        self.limit = limit
+        self.state = state
+        self.keep_tail = keep_tail
+
+    def write(self, text: str) -> int:
+        raw = text.encode("utf-8", errors="replace")
+        self.state["truncated"] |= _append_bounded(
+            self.buffer, raw, self.limit, keep_tail=self.keep_tail
+        )
+        return self.mirror.write(text)
+
+    def flush(self) -> None:
+        self.mirror.flush()
+
+
 class _RedactingLineMirror:
-    def __init__(self, mirror: TextIO) -> None:
+    def __init__(self, mirror: TextIO | _RedactedOutputSink) -> None:
         self.mirror = mirror
         self.pending = bytearray()
         self.private_key_block = False
@@ -166,15 +193,28 @@ def _pump(
     mirror: TextIO | None,
     keep_tail: bool,
 ) -> None:
-    redacting_mirror = _RedactingLineMirror(mirror) if mirror is not None else None
+    redacting_mirror = None
+    if mirror is not None:
+        redacting_mirror = _RedactingLineMirror(
+            _RedactedOutputSink(
+                mirror,
+                buffer,
+                limit,
+                state,
+                keep_tail=keep_tail,
+            )
+        )
     try:
         while True:
             chunk = stream.read(8192)
             if not chunk:
                 break
             raw = chunk.encode("utf-8", errors="replace") if isinstance(chunk, str) else bytes(chunk)
-            state["truncated"] |= _append_bounded(buffer, raw, limit, keep_tail=keep_tail)
-            if redacting_mirror is not None:
+            if redacting_mirror is None:
+                state["truncated"] |= _append_bounded(
+                    buffer, raw, limit, keep_tail=keep_tail
+                )
+            else:
                 redacting_mirror.feed(raw)
         if redacting_mirror is not None:
             redacting_mirror.finish()
