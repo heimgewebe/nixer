@@ -115,6 +115,29 @@ def test_pump_redacts_multiline_quoted_credential_value() -> None:
     assert live.count("<REDACTED>") >= 2
 
 
+def test_pump_redacts_multiline_quoted_credential_value_across_bare_carriage_returns() -> None:
+    label = b"pass" + b"word"
+    stream = io.BytesIO(
+        label + b'= "first-secret\rsecond-secret" suffix\rsafe: visible\r'
+    )
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    for secret in ("first-secret", "second-secret"):
+        assert secret not in detail
+        assert secret not in live
+    for visible in ("suffix", "safe: visible"):
+        assert visible in detail
+        assert visible in live
+    assert detail.count("<REDACTED>") >= 2
+    assert live.count("<REDACTED>") >= 2
+
+
 def test_pump_redacts_yaml_block_scalar_credential() -> None:
     label = b"pass" + b"word"
     stream = io.BytesIO(
@@ -263,6 +286,24 @@ def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
     redactor.finish()
     assert "sk-" not in mirror.getvalue()
     assert "<REDACTED>" in mirror.getvalue()
+
+
+def test_redacting_line_mirror_preserves_split_crlf_boundaries() -> None:
+    mirror = io.StringIO()
+    redactor = evidence._RedactingLineMirror(mirror)
+
+    redactor.feed(b'password="first-secret\r')
+    assert mirror.getvalue() == ""
+    redactor.feed(b'\nsecond-secret" suffix\r')
+    redactor.feed(b'\nsafe: visible\r\n')
+    redactor.finish()
+
+    output = mirror.getvalue()
+    assert "first-secret" not in output
+    assert "second-secret" not in output
+    assert "suffix" in output
+    assert "safe: visible" in output
+    assert output.count("\r\n") == 3
 
 
 def test_redacting_line_mirror_suppresses_oversized_stream() -> None:

@@ -149,6 +149,7 @@ class _RedactingLineMirror:
         self.mirror = mirror
         self.state = state
         self.pending = bytearray()
+        self.pending_cr = False
         self.private_key_block = False
         self.secret_value_continuation = False
         self.secret_quoted_value_quote: str | None = None
@@ -215,6 +216,8 @@ class _RedactingLineMirror:
             return "\r\n"
         if text.endswith("\n"):
             return "\n"
+        if text.endswith("\r"):
+            return "\r"
         return ""
 
     def _emit_line(self, raw: bytes) -> None:
@@ -284,12 +287,25 @@ class _RedactingLineMirror:
         if self.disabled:
             return
         for value in raw:
+            if self.pending_cr:
+                if value == 0x0A:
+                    self._emit_line(bytes(self.pending) + b"\r\n")
+                    self.pending.clear()
+                    self.pending_cr = False
+                    continue
+                self._emit_line(bytes(self.pending) + b"\r")
+                self.pending.clear()
+                self.pending_cr = False
+            if value == 0x0D:
+                self.pending_cr = True
+                continue
             if value == 0x0A:
                 self._emit_line(bytes(self.pending) + b"\n")
                 self.pending.clear()
                 continue
             if len(self.pending) >= MAX_LIVE_LOG_LINE_BYTES:
                 self.pending.clear()
+                self.pending_cr = False
                 self.disabled = True
                 if self.state is not None:
                     self.state["truncated"] = True
@@ -299,7 +315,13 @@ class _RedactingLineMirror:
             self.pending.append(value)
 
     def finish(self) -> None:
-        if not self.disabled and self.pending:
+        if self.disabled:
+            return
+        if self.pending_cr:
+            self._emit_line(bytes(self.pending) + b"\r")
+            self.pending.clear()
+            self.pending_cr = False
+        elif self.pending:
             self._emit_line(bytes(self.pending))
             self.pending.clear()
 
