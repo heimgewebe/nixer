@@ -708,6 +708,32 @@ def test_system_build_returns_structured_failure_for_oversized_output(
     assert result["failure"]["class"] == "structured_output_too_large"
 
 
+def test_system_build_failure_suppresses_freeform_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": 1,
+            "stdout": "",
+            "failure_class": "derivation_failed",
+            "stderr": "password=secret-that-must-never-cross-boundary",
+            "stdout_truncated": False,
+            "stderr_truncated": True,
+        },
+    )
+
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+    serialized = json.dumps(result)
+
+    assert "secret-that-must-never-cross-boundary" not in serialized
+    assert result["failure"]["class"] == "derivation_failed"
+    assert result["failure"]["detail"] == "build diagnostics suppressed by evidence boundary"
+    assert result["failure"]["detail_truncated"] is True
+
+
 def test_system_build_failure_preserves_operator_lifecycle(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
     monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
@@ -718,7 +744,7 @@ def test_system_build_failure_preserves_operator_lifecycle(monkeypatch, tmp_path
         lambda _argv: {
             "returncode": 1,
             "stdout": "",
-            "stderr": "error: builder for '/nix/store/x.drv' failed",
+            "failure_class": "derivation_failed",
             "stdout_truncated": False,
             "stderr_truncated": False,
         },

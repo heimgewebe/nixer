@@ -456,7 +456,7 @@ def _run_streaming(argv: list[str]) -> dict[str, Any]:
         return {
             "returncode": 127,
             "stdout": "",
-            "stderr": "container client executable unavailable",
+            "failure_class": "container_client_unavailable",
             "stdout_truncated": False,
             "stderr_truncated": False,
         }
@@ -478,10 +478,12 @@ def _run_streaming(argv: list[str]) -> dict[str, Any]:
         kwargs={"mirror": None, "keep_tail": False},
         daemon=True,
     )
+    # Build stderr is operator-internal classification input only. Free-form
+    # diagnostics never cross the evidence boundary or the live stderr channel.
     stderr_thread = threading.Thread(
         target=_pump,
         args=(process.stderr, stderr_buffer, MAX_FAILURE_DETAIL_BYTES, stderr_state),
-        kwargs={"mirror": sys.stderr, "keep_tail": True},
+        kwargs={"mirror": None, "keep_tail": True},
         daemon=True,
     )
     stdout_thread.start()
@@ -491,11 +493,13 @@ def _run_streaming(argv: list[str]) -> dict[str, Any]:
     stderr_thread.join()
 
     stdout = stdout_buffer.decode("utf-8", errors="replace")
-    stderr = server._redact(stderr_buffer.decode("utf-8", errors="replace"))
+    stderr_internal = stderr_buffer.decode("utf-8", errors="replace")
     return {
         "returncode": returncode,
         "stdout": stdout,
-        "stderr": stderr,
+        "failure_class": (
+            _classify_failure(stderr_internal, returncode) if returncode != 0 else None
+        ),
         "stdout_truncated": stdout_state["truncated"],
         "stderr_truncated": stderr_state["truncated"],
     }
@@ -705,9 +709,9 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
             "status": "build_failed",
             "backend": _evidence_backend(),
             "failure": {
-                "class": _classify_failure(result["stderr"], result["returncode"]),
+                "class": result["failure_class"] or "nix_build_failed",
                 "nix_exit_code": result["returncode"],
-                "detail": result["stderr"],
+                "detail": "build diagnostics suppressed by evidence boundary",
                 "detail_truncated": result["stderr_truncated"],
             },
             "observed_at": observed_at,
