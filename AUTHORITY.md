@@ -60,7 +60,7 @@ Der Host benötigt kein installiertes Nix. Nix-Kommandos laufen ausschließlich 
 - Nix evaluiert diesen Snapshot als `git+file://`-Quelle, sodass ein sauberer Checkout seine Git-Revision behält und getrackte lokale Änderungen als dirty Quelle sichtbar bleiben;
 - der Container startet mit `--cap-drop=ALL` und erhält ausschließlich `CHOWN` und `DAC_READ_SEARCH`;
 - `no-new-privileges` und `--rm` bleiben aktiv;
-- Nix-Artefakte entstehen in v0 nur im flüchtigen Container-Dateisystem und werden mit dem Container verworfen.
+- Nix-Artefakte entstehen im flüchtigen Container-Dateisystem und werden mit dem Container verworfen, sofern ein Operator keinen getrennten externen Persistenzpfad bereitstellt.
 
 Flake-Inputs dürfen entsprechend dem gebundenen Lockfile aus dem Netz gelesen werden. Nixer erhält keinen frei wählbaren URL-/Shell-Endpunkt. Ein fehlender Container-Client, ein fehlendes oder nicht exakt passendes Nix-Image oder unsichere Linked-Worktree-Metadaten führen fail-closed zu einem Backend-Fehler. Nixer zieht oder aktualisiert das Image niemals selbst.
 
@@ -81,11 +81,19 @@ Die vorhandenen Primitive sollen fachlich kombiniert werden, bevor ein neues öf
 
 Ein echter `nix build`, `nixos-rebuild`, `switch`, `boot`, `test`, `nixos-install` oder anderer Realisierungs-/Aktivierungspfad gehört nicht zum synchronen MCP-v0.
 
-## Packaging und spätere Builds
+## Packaging und Buildadapter
 
 Nixer darf als reproduzierbares Nix-Paket und generisches NixOS-Modul ausgeliefert werden. Packaging erweitert seine Runtime-Autorität nicht; ein Host wie `heim-pc` entscheidet, ob und mit welcher Revision Nixer läuft.
 
-Längere oder ressourcenintensive echte Builds dürfen später nur als fest typisierte Nixer-Fachadapter entstehen. Der langlebige Prozess-, Ressourcen-, Log-, Retry- und Unknown-Outcome-Lifecycle bleibt beim zuständigen Operator, zunächst über dessen bestehende Task-Surface. Nixer baut dafür keine zweite Control-Plane.
+Längere oder ressourcenintensive echte Builds dürfen ausschließlich als fest typisierte Nixer-Fachadapter außerhalb des MCP-Lifecycles entstehen. Der langlebige Prozess-, Ressourcen-, Log-, Cancel-, Retry- und Unknown-Outcome-Lifecycle bleibt beim zuständigen Operator über dessen bestehende Task-Surface. Nixer baut dafür keine zweite Control-Plane.
+
+Der erste Adapter `nixer-evidence system-build` besitzt genau eine Realisierungsoperation: Er baut `nixosConfigurations.<host>.config.system.build.toplevel` aus einem bereits vom Operator ausgewählten Repository. Er bietet keinen freien Nix-Ausdruck, kein beliebiges Nix-ARGV und kein beliebiges Containerkommando. Er verwendet dieselbe read-only Snapshot-Semantik und denselben gepinnten Nix-Backendcontainer wie MCP v0.
+
+Für Realisierungen wird die Capability-Menge nicht um `SETUID` oder `SETGID` erweitert. Der Adapter deaktiviert stattdessen Nix' Build-User-Umschaltung mit `build-users-group = ""`; Derivations laufen damit als root **innerhalb des Wegwerfcontainers**, weiterhin ohne Container-Socket, ohne beschreibbaren Repository-Mount und unter `--cap-drop=ALL` mit ausschließlich `CHOWN` und `DAC_READ_SEARCH`. Container-root ist keine Host-root-Autorität.
+
+`system-build` darf den beobachteten Git-HEAD und Dirty-Status der untersuchten Source ausgeben. Diese Felder sind ausdrücklich nur Source-Beobachtung. Für operative Build-, Merge- oder Deploy-Evidenz bindet weiterhin der Operator die exakte Source-Identität.
+
+Der Adapter sammelt Buildresultate noch innerhalb des flüchtigen Nix-Stores ein: System-Toplevel, Closure-Informationen, Kernel, initrd und eine begrenzte sichere Bootspec-Zusammenfassung. Beliebige Bootspec-Erweiterungen oder Kernelparameter werden nicht pauschal als Ergebnis ausgegeben. Buildfehler werden begrenzt und redigiert klassifiziert; die vollständige Prozess- und Log-Wahrheit bleibt beim Operator.
 
 ## Arbeitsmethode
 
@@ -94,7 +102,7 @@ Nixer bevorzugt direkte Nix-Evidenz vor Workarounds:
 1. resultierenden Wert oder Output bestimmen;
 2. relevante Flake-/Modul-/Attributauflösung bestimmen;
 3. Definitionsherkunft, Priorität, Override oder Derivation nachvollziehen;
-4. die Behauptung durch reale Evaluation oder einen Nix-Dry-Run prüfen;
+4. die Behauptung durch reale Evaluation, einen Nix-Dry-Run oder einen operatorgeführten typisierten Build prüfen;
 5. erst dann eine Nix-Lösung oder einen nächsten Fachschritt formulieren.
 
 Wenn eine Aussage mit den verfügbaren Nix-Primitiven nicht belegt werden kann, wird die Lücke benannt statt interpoliert.

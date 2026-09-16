@@ -14,19 +14,23 @@
 
       packageFor = pkgs:
         let
-          mcp130 = pkgs.python3Packages.mcp.overridePythonAttrs (_old: {
+          mcp130 = pkgs.python3Packages.mcp.overridePythonAttrs (old: {
             version = "1.30.0";
             src = pkgs.fetchPypi {
               pname = "mcp";
               version = "1.30.0";
               hash = "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=";
             };
+            # The real-build backend deliberately runs without SETUID/SETGID.
+            # Consequently Nix builds as container-root; this one upstream test
+            # assumes chmod(000) is unreadable, which is false for root.
+            disabledTests = (old.disabledTests or [ ]) ++ [ "test_permission_error" ];
           });
           python = pkgs.python3.withPackages (_ps: [ mcp130 ]);
         in
         pkgs.stdenvNoCC.mkDerivation {
           pname = "nixer";
-          version = "0.1.0";
+          version = "0.2.0";
           dontUnpack = true;
           nativeBuildInputs = [ pkgs.makeWrapper ];
           dontBuild = true;
@@ -35,13 +39,16 @@
             runHook preInstall
             mkdir -p "$out/bin" "$out/libexec/nixer"
             cp ${./server.py} "$out/libexec/nixer/server.py"
+            cp ${./evidence.py} "$out/libexec/nixer/evidence.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer" \
               --add-flags "$out/libexec/nixer/server.py"
+            makeWrapper ${python}/bin/python "$out/bin/nixer-evidence" \
+              --add-flags "$out/libexec/nixer/evidence.py"
             runHook postInstall
           '';
 
           meta = {
-            description = "Nix-only specialist MCP for Nix, Nixpkgs and NixOS";
+            description = "Nix-only specialist MCP and fixed evidence adapter for Nix/NixOS";
             mainProgram = "nixer";
             platforms = supportedSystems;
           };
