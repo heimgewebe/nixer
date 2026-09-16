@@ -21,7 +21,7 @@ def test_nixos_module_keeps_mcp_loopback_only() -> None:
     assert "NIXER_DOCKER_BIN" in source
     assert "systemd.user.services.nixer" in source
     assert "NoNewPrivileges = true" in source
-    assert "ProtectHome = \"read-only\"" in source
+    assert "ProtectSystem = \"strict\"" in source
 
 
 def test_snapshot_retracks_only_the_patch_materialized_in_the_ephemeral_clone() -> None:

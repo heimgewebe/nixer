@@ -44,7 +44,8 @@ in
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
-        ProtectHome = "read-only";
+        # Rootless runtimes keep writable container state below the user's home.
+        # Host policy may narrow this further when it owns a dedicated store.
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         RestrictSUIDSGID = true;
         LockPersonality = true;
