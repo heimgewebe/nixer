@@ -1,7 +1,9 @@
 {
   description = "Nixer — narrow Nix/Nixpkgs/NixOS specialist";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  # Nixer owns its runtime dependency set. Host flakes pin Nixer as a product;
+  # they do not substitute their own Nixpkgs into Nixer's Python environment.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
     let
@@ -12,7 +14,15 @@
 
       packageFor = pkgs:
         let
-          python = pkgs.python3.withPackages (ps: [ ps.mcp ]);
+          mcp130 = pkgs.python3Packages.mcp.overridePythonAttrs (_old: {
+            version = "1.30.0";
+            src = pkgs.fetchPypi {
+              pname = "mcp";
+              version = "1.30.0";
+              hash = "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=";
+            };
+          });
+          python = pkgs.python3.withPackages (_ps: [ mcp130 ]);
         in
         pkgs.stdenvNoCC.mkDerivation {
           pname = "nixer";

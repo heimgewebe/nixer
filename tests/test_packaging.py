@@ -12,7 +12,8 @@ def test_flake_exports_package_and_nixos_module() -> None:
     assert "packages = forAllSystems" in source
     assert "nixosModules.default" in source
     assert "checks = forAllSystems" in source
-    assert "ps.mcp" in source
+    assert 'version = "1.30.0"' in source
+    assert "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=" in source
 
 
 def test_nixos_module_keeps_mcp_loopback_only() -> None:
