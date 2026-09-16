@@ -110,6 +110,21 @@ def test_shared_redactor_handles_yaml_doubled_single_quotes() -> None:
     assert redacted == "<REDACTED> suffix-visible"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "password=abc,def",
+        "token: abc;def",
+    ],
+)
+def test_shared_redactor_consumes_punctuation_in_unquoted_credentials(payload: str) -> None:
+    redacted = server._redact(payload)
+
+    assert "abc" not in redacted
+    assert "def" not in redacted
+    assert redacted == "<REDACTED>"
+
+
 def test_backend_probe_rejects_relative_container_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "DOCKER_BIN", Path("podman"))
     backend = server._backend_probe()

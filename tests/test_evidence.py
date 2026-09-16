@@ -187,6 +187,52 @@ def test_pump_redacts_yaml_block_scalar_credential() -> None:
     assert live.count("<REDACTED>") >= 3
 
 
+def test_pump_redacts_inline_multiline_plain_yaml_credential_until_dedent() -> None:
+    label = b"pass" + b"word"
+    cases = (
+        label + b": first-secret-line\n  second-secret-line\n  third-secret-line\nsafe: visible\n",
+        b"  - " + label + b": list-secret-one\n      list-secret-two\n      list-secret-three\n    safe: visible\n  - next: visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in (
+            "first-secret-line", "second-secret-line", "third-secret-line",
+            "list-secret-one", "list-secret-two", "list-secret-three",
+        ):
+            assert secret not in detail
+            assert secret not in live
+        assert "safe: visible" in detail
+        assert "safe: visible" in live
+        if b"next: visible" in payload:
+            assert "next: visible" in detail
+            assert "next: visible" in live
+
+
+def test_pump_redacts_punctuation_in_unquoted_credential_value() -> None:
+    payload = b"password=abc,def;ghi\nsafe: visible\n"
+    stream = io.BytesIO(payload)
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    for secret in ("abc", "def", "ghi"):
+        assert secret not in detail
+        assert secret not in live
+    assert "safe: visible" in detail
+    assert "safe: visible" in live
+
+
 def test_pump_redacts_multiline_plain_yaml_credential_value_until_dedent() -> None:
     label = b"pass" + b"word"
     cases = (

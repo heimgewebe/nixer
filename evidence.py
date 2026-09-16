@@ -185,6 +185,17 @@ class _RedactingLineMirror:
         return len(match.group("indent")) + len(match.group("sequence") or "")
 
     @staticmethod
+    def _secret_inline_plain_value_base_indent(text: str) -> int | None:
+        logical = text.rstrip("\r\n")
+        match = re.search(
+            r"""(?i)^(?P<indent>[ \t]*)(?P<sequence>(?:-\s+)+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*:\s*(?P<value>[^"'|>\s].*)$""",
+            logical,
+        )
+        if match is None or match.group("value").lstrip().startswith("#"):
+            return None
+        return len(match.group("indent")) + len(match.group("sequence") or "")
+
+    @staticmethod
     def _secret_block_scalar_base_indent(text: str) -> int | None:
         logical = text.rstrip("\r\n")
         match = re.search(
@@ -313,6 +324,7 @@ class _RedactingLineMirror:
         else:
             block_scalar_indent = self._secret_block_scalar_base_indent(text)
             quoted_value = self._secret_quoted_value(text)
+            inline_plain_indent = self._secret_inline_plain_value_base_indent(text)
             if block_scalar_indent is not None:
                 self.mirror.write("<REDACTED>" + ending)
                 self.secret_block_scalar_base_indent = block_scalar_indent
@@ -329,6 +341,11 @@ class _RedactingLineMirror:
                 self.secret_quoted_value_quote = quote if suffix is None else None
                 self.secret_value_continuation = False
                 self.secret_plain_value_base_indent = None
+            elif inline_plain_indent is not None:
+                self.mirror.write(server._redact(text))
+                self.secret_value_continuation = True
+                self.secret_plain_value_base_indent = inline_plain_indent
+                self.secret_plain_value_started = True
             elif self._secret_label_without_value(text):
                 self.mirror.write("<REDACTED>" + ending)
                 self.secret_value_continuation = True
