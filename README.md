@@ -98,9 +98,13 @@ Der dazugehörige OpenAI-Tunnel ist separat versioniert:
 
 Die ChatGPT-Plugin-/Connector-Erstellung bleibt bewusst eine manuelle Benutzeraktion, damit Name, Beschreibung und Bild im ChatGPT-UI gewählt werden können. Weder Nixer noch Grabowski erstellen den ChatGPT-Connector selbst.
 
-Lokaler Start:
+Auf einem frischen Host müssen die versionierten Units zuerst in den systemd-User-Suchpfad verlinkt und das Tunnelprofil installiert werden. Der Tunnel-Service erwartet außerdem die lokal provisionierte Datei `~/.config/tunnel-client/grabowski-runtime.env` mit `CONTROL_PLANE_API_KEY`; Secret-Provisionierung ist nicht Teil dieses Repositories.
 
 ```bash
-systemctl --user enable --now nixer-mcp.service
-systemctl --user enable --now tunnel-client-nixer.service
+mkdir -p "$HOME/.config/tunnel-client"
+install -m 0600 deploy/nixer.yaml "$HOME/.config/tunnel-client/nixer.yaml"
+systemctl --user link "$PWD/deploy/nixer-mcp.service"
+systemctl --user link "$PWD/deploy/tunnel-client-nixer.service"
+systemctl --user daemon-reload
+systemctl --user enable --now nixer-mcp.service tunnel-client-nixer.service
 ```
