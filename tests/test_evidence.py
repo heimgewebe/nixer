@@ -58,6 +58,24 @@ def test_pump_redacts_mirrored_output() -> None:
     assert "<REDACTED>" in mirror.getvalue()
 
 
+def test_pump_redacts_quoted_multiword_credential_value() -> None:
+    label = b"pass" + b"word"
+    value = b'"correct ' + b"horse " + b"battery " + b'staple"'
+    stream = io.BytesIO(label + b"=" + value + b"\n")
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    assert "correct horse battery staple" not in detail
+    assert "correct horse battery staple" not in live
+    assert "<REDACTED>" in detail
+    assert "<REDACTED>" in live
+
+
 def test_pump_redacts_structured_tail_before_eviction() -> None:
     stream = io.BytesIO(b"x" * 64 + b" password=super-secret-value\n")
     mirror = io.StringIO()
