@@ -20,9 +20,16 @@ def test_nixos_module_keeps_mcp_loopback_only() -> None:
     source = (ROOT / "nix" / "module.nix").read_text(encoding="utf-8")
     assert "--host 127.0.0.1" in source
     assert "NIXER_DOCKER_BIN" in source
+    assert "NIXER_CONTAINER_PATH" in source
+    assert "NIXER_REPO_ROOT" in source
     assert "systemd.user.services.nixer" in source
-    assert "NoNewPrivileges = true" in source
-    assert "ProtectSystem = \"strict\"" in source
+    assert "ConditionUser" in source
+    assert "NoNewPrivileges = true" not in source
+    assert "ProtectSystem" not in source
+    assert "PrivateTmp" not in source
+    assert "RestrictAddressFamilies" not in source
+    assert "RestrictSUIDSGID" not in source
+    assert "LockPersonality" not in source
 
 
 def test_snapshot_retracks_only_the_patch_materialized_in_the_ephemeral_clone() -> None:

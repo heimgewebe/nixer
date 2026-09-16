@@ -14,8 +14,14 @@ from mcp.types import ToolAnnotations
 
 APP_NAME = "Nixer"
 IDENTITY = "nixer-nix-specialist-v0"
-REPO_ROOT = Path("/home/alex/repos").resolve()
+DEFAULT_REPO_ROOT = Path.home() / "repos"
+REPO_ROOT = Path(os.environ.get("NIXER_REPO_ROOT", str(DEFAULT_REPO_ROOT))).expanduser().resolve()
 DOCKER_BIN = Path(os.environ.get("NIXER_DOCKER_BIN", "/usr/bin/docker"))
+CONTAINER_PATH = os.environ.get("NIXER_CONTAINER_PATH", "/usr/bin:/bin")
+CONTAINER_HOME = os.environ.get("NIXER_CONTAINER_HOME", os.environ.get("HOME", str(Path.home())))
+CONTAINER_XDG_RUNTIME_DIR = os.environ.get(
+    "NIXER_CONTAINER_XDG_RUNTIME_DIR", os.environ.get("XDG_RUNTIME_DIR", "")
+)
 NIX_BIN = "/nix/var/nix/profiles/default/bin/nix"
 GIT_BIN = "/nix/var/nix/profiles/default/bin/git"
 BASH_BIN = "/nix/var/nix/profiles/default/bin/bash"
@@ -67,6 +73,7 @@ mcp = FastMCP(APP_NAME, instructions=INSTRUCTIONS)
 
 _ATTR_PATH_RE = re.compile(r"^[A-Za-z0-9_+\-]+(?:\.[A-Za-z0-9_+\-]+)*$")
 _REPO_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_IMAGE_ID_RE = re.compile(r"^(?:sha256:)?([0-9A-Fa-f]{64})$")
 _SECRET_PATTERNS = (
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -99,12 +106,14 @@ def _run(argv: list[str], *, timeout: int = 120) -> dict[str, Any]:
     if not argv or argv[0] != str(DOCKER_BIN):
         raise ValueError("Nixer only executes the fixed container client")
     env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/home/alex",
+        "PATH": CONTAINER_PATH,
+        "HOME": CONTAINER_HOME,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "NO_COLOR": "1",
     }
+    if CONTAINER_XDG_RUNTIME_DIR:
+        env["XDG_RUNTIME_DIR"] = CONTAINER_XDG_RUNTIME_DIR
     try:
         completed = subprocess.run(
             argv,
@@ -158,11 +167,11 @@ def _resolve_repo(repo: str) -> Path:
     try:
         relative = resolved.relative_to(REPO_ROOT)
     except ValueError as exc:
-        raise PermissionError("repository is outside /home/alex/repos") from exc
+        raise PermissionError("repository is outside the configured repository root") from exc
     if not relative.parts or any(not _REPO_PART_RE.fullmatch(part) for part in relative.parts):
         raise PermissionError("repository path contains unsupported characters")
     if not resolved.is_dir() or not (resolved / ".git").exists():
-        raise ValueError("repository must be a Git checkout under /home/alex/repos")
+        raise ValueError("repository must be a Git checkout under the configured repository root")
     return resolved
 
 
@@ -185,6 +194,12 @@ def _linked_git_common_dir(root: Path) -> Path | None:
     if not git_dir_candidate.is_absolute():
         git_dir_candidate = dot_git.parent / git_dir_candidate
     git_dir = git_dir_candidate.resolve(strict=True)
+    try:
+        git_relative = git_dir.relative_to(REPO_ROOT)
+    except ValueError as exc:
+        raise PermissionError("linked-worktree Git directory is outside the repository root") from exc
+    if any(not _REPO_PART_RE.fullmatch(part) for part in git_relative.parts):
+        raise PermissionError("linked-worktree Git metadata path contains unsupported characters")
 
     commondir_file = git_dir / "commondir"
     if not commondir_file.is_file():
@@ -201,7 +216,7 @@ def _linked_git_common_dir(root: Path) -> Path | None:
     try:
         common_relative = common_dir.relative_to(REPO_ROOT)
     except ValueError as exc:
-        raise PermissionError("linked-worktree common Git directory is outside /home/alex/repos") from exc
+        raise PermissionError("linked-worktree common Git directory is outside the repository root") from exc
     if any(not _REPO_PART_RE.fullmatch(part) for part in common_relative.parts):
         raise PermissionError("linked-worktree Git metadata path contains unsupported characters")
     return common_dir
@@ -213,6 +228,13 @@ def _validate_attr_path(value: str, *, field: str) -> str:
     if len(value) > 500:
         raise ValueError(f"{field} is too long")
     return value
+
+
+def _canonical_image_id(value: str) -> str | None:
+    match = _IMAGE_ID_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    return f"sha256:{match.group(1).lower()}"
 
 
 def _backend_probe() -> dict[str, Any]:
@@ -234,7 +256,8 @@ def _backend_probe() -> dict[str, Any]:
         [str(DOCKER_BIN), "image", "inspect", "--format", "{{.Id}}", PINNED_NIX_IMAGE_ID],
         timeout=15,
     )
-    actual = inspected["stdout"].strip() if inspected["returncode"] == 0 else ""
+    actual_raw = inspected["stdout"].strip() if inspected["returncode"] == 0 else ""
+    actual = _canonical_image_id(actual_raw)
     if inspected["returncode"] != 0:
         return {
             "ready": False,
@@ -251,7 +274,7 @@ def _backend_probe() -> dict[str, Any]:
             "reason": "pinned_image_identity_mismatch",
             "container_client": str(DOCKER_BIN),
             "expected_image_id": PINNED_NIX_IMAGE_ID,
-            "actual_image_id": actual,
+            "actual_image_id": actual_raw,
             "probe": inspected,
         }
     return {

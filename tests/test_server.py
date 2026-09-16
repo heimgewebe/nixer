@@ -107,6 +107,103 @@ def test_backend_probe_rejects_relative_container_client(monkeypatch: pytest.Mon
     assert backend["reason"] == "container_client_path_not_absolute"
 
 
+@pytest.mark.parametrize(
+    "inspect_id",
+    [
+        server.PINNED_NIX_IMAGE_ID,
+        server.PINNED_NIX_IMAGE_ID.removeprefix("sha256:"),
+        server.PINNED_NIX_IMAGE_ID.upper().replace("SHA256:", "sha256:"),
+    ],
+)
+def test_backend_probe_accepts_full_sha256_image_id_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inspect_id: str
+) -> None:
+    client = tmp_path / "podman"
+    client.touch()
+    monkeypatch.setattr(server, "DOCKER_BIN", client)
+    monkeypatch.setattr(
+        server,
+        "_run",
+        lambda *_args, **_kwargs: {
+            "returncode": 0,
+            "stdout": inspect_id + "\n",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        },
+    )
+    backend = server._backend_probe()
+    assert backend["ready"] is True
+    assert backend["image_id"] == server.PINNED_NIX_IMAGE_ID
+
+
+@pytest.mark.parametrize(
+    "inspect_id",
+    [
+        "98edc6813218",
+        "sha256:not-a-digest",
+        "sha256:" + "0" * 64,
+    ],
+)
+def test_backend_probe_rejects_invalid_or_different_image_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inspect_id: str
+) -> None:
+    client = tmp_path / "podman"
+    client.touch()
+    monkeypatch.setattr(server, "DOCKER_BIN", client)
+    monkeypatch.setattr(
+        server,
+        "_run",
+        lambda *_args, **_kwargs: {
+            "returncode": 0,
+            "stdout": inspect_id + "\n",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        },
+    )
+    backend = server._backend_probe()
+    assert backend["ready"] is False
+    assert backend["reason"] == "pinned_image_identity_mismatch"
+    assert backend["actual_image_id"] == inspect_id
+
+
+def test_container_client_runtime_environment_is_startup_bound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = tmp_path / "podman"
+    client.touch()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(server, "DOCKER_BIN", client)
+    monkeypatch.setattr(server, "CONTAINER_PATH", "/run/wrappers/bin:/nix/store/podman/bin")
+    monkeypatch.setattr(server, "CONTAINER_HOME", "/home/operator")
+    monkeypatch.setattr(server, "CONTAINER_XDG_RUNTIME_DIR", "/run/user/1000")
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_subprocess_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return Completed()
+
+    monkeypatch.setattr(server.subprocess, "run", fake_subprocess_run)
+    result = server._run([str(client), "version"])
+    assert result["returncode"] == 0
+    assert captured["env"] == {
+        "PATH": "/run/wrappers/bin:/nix/store/podman/bin",
+        "HOME": "/home/operator",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "NO_COLOR": "1",
+    }
+
+
 def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,6 +291,21 @@ def test_linked_worktree_mounts_only_exact_common_git_dir_read_only(
     assert f"type=bind,src={repo},dst=/workspace,readonly" in mounts
     assert f"type=bind,src={common_dir},dst={common_dir},readonly" in mounts
     assert result["backend"]["linked_worktree_git_metadata"] == "read-only-common-dir"
+
+
+def test_linked_worktree_git_dir_is_rejected_before_commondir_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repos"
+    repo = root / "fixture"
+    repo.mkdir(parents=True)
+    outside_git_dir = tmp_path / "outside" / "worktrees" / "fixture"
+    outside_git_dir.mkdir(parents=True)
+    (repo / ".git").write_text(f"gitdir: {outside_git_dir}\n", encoding="utf-8")
+    monkeypatch.setattr(server, "REPO_ROOT", root.resolve())
+
+    with pytest.raises(PermissionError, match="Git directory is outside"):
+        server._linked_git_common_dir(repo.resolve())
 
 
 def test_linked_worktree_common_git_dir_must_stay_under_repo_root(
