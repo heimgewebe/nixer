@@ -16,7 +16,7 @@ MAX_STRUCTURED_STDOUT_BYTES = 512_000
 MAX_FAILURE_DETAIL_BYTES = 32_000
 MAX_LIVE_LOG_LINE_BYTES = 16_384
 MAX_BOOTSPEC_BYTES = 65_536
-_SAFE_BOOTSPEC_V1_FIELDS = ("label", "system", "kernel", "initrd", "init", "toplevel")
+_SAFE_BOOTSPEC_V1_FIELDS = ("system", "kernel", "initrd", "init", "toplevel")
 
 SYSTEM_BUILD_SCRIPT = r'''set -euo pipefail
 umask 077
@@ -552,8 +552,6 @@ def _bootspec_summary(
             item = v1[key]
             if not (isinstance(item, (str, int, float, bool)) or item is None):
                 continue
-            if key == "label" and isinstance(item, str):
-                item = server._redact(item)
             safe_v1[key] = item
         result["v1"] = safe_v1
     return result

@@ -400,7 +400,7 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     raw = json.dumps(
         {
             "org.nixos.bootspec.v1": {
-                "label": "password=bootspec-secret-value",
+                "label": "password: 'correct horse''s battery staple'",
                 "kernel": "/nix/store/kernel",
                 "initrd": "/nix/store/initrd",
                 "toplevel": "/nix/store/system",
@@ -414,10 +414,28 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     assert summary["path"] == "/nix/store/system/boot.json"
     assert "top_level_keys" not in summary
     assert summary["v1"]["kernel"] == "/nix/store/kernel"
-    assert "bootspec-secret-value" not in summary["v1"]["label"]
-    assert "<REDACTED>" in summary["v1"]["label"]
+    assert "label" not in summary["v1"]
     assert "kernelParams" not in summary["v1"]
     assert "foreign.extension" not in summary
+
+
+def test_bootspec_summary_omits_yaml_doubled_quote_label() -> None:
+    label = "pass" + "word"
+    secret = "correct horse''s battery staple"
+    raw = json.dumps(
+        {
+            "org.nixos.bootspec.v1": {
+                "label": f"{label}: '{secret}' suffix",
+                "kernel": "/nix/store/kernel",
+            }
+        }
+    )
+
+    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
+
+    assert "label" not in summary["v1"]
+    assert secret not in json.dumps(summary)
+    assert summary["v1"]["kernel"] == "/nix/store/kernel"
 
 
 def test_bootspec_summary_omits_arbitrary_top_level_keys() -> None:
