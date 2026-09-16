@@ -710,6 +710,58 @@ def test_system_build_returns_structured_failure_for_oversized_output(
     assert result["failure"]["class"] == "structured_output_too_large"
 
 
+def test_system_build_returns_structured_probe_spawn_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+
+    def fail_probe():
+        raise OSError(24, "too many open files")
+
+    monkeypatch.setattr(evidence.server, "_backend_probe", fail_probe)
+
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+
+    assert result["success"] is False
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == "container_probe_spawn_failed"
+    assert result["failure"]["errno"] == 24
+
+
+@pytest.mark.parametrize(
+    ("returncode", "failure_class"),
+    [
+        (125, "container_run_failed"),
+        (126, "container_entrypoint_not_executable"),
+        (127, "container_entrypoint_not_found"),
+    ],
+)
+def test_system_build_classifies_container_launch_exits(
+    monkeypatch, tmp_path: Path, returncode: int, failure_class: str
+) -> None:
+    monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
+    monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
+    monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
+    monkeypatch.setattr(
+        evidence,
+        "_run_streaming",
+        lambda _argv: {
+            "returncode": returncode,
+            "stdout": "",
+            "failure_class": "nix_build_failed",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        },
+    )
+
+    result = evidence.system_build(str(tmp_path), "heim-pc")
+
+    assert result["success"] is False
+    assert result["status"] == "evidence_failed"
+    assert result["failure"]["class"] == failure_class
+    assert result["failure"]["container_exit_code"] == returncode
+    assert "nix_exit_code" not in result["failure"]
+
+
 @pytest.mark.parametrize(
     ("returncode", "failure_class"),
     [

@@ -693,8 +693,28 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
     if "." in host_attr:
         raise ValueError("host must be a single Nix attribute segment")
     git_common_dir = server._linked_git_common_dir(root)
-    backend = server._backend_probe()
     observed_at = server._utc_now()
+    try:
+        backend = server._backend_probe()
+    except OSError as exc:
+        failure: dict[str, Any] = {
+            "class": "container_probe_spawn_failed",
+            "detail": "container readiness probe could not be started",
+        }
+        if exc.errno is not None:
+            failure["errno"] = exc.errno
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": failure,
+            "observed_at": observed_at,
+        }
     if not backend["ready"]:
         return {
             "schema_version": 1,
@@ -727,6 +747,30 @@ def system_build(repo: str, host: str) -> dict[str, Any]:
             "status": "evidence_failed",
             "backend": _evidence_backend(),
             "failure": failure,
+            "observed_at": observed_at,
+        }
+    container_failures = {
+        125: ("container_run_failed", "container client rejected the run request"),
+        126: ("container_entrypoint_not_executable", "container entrypoint could not be invoked"),
+        127: ("container_entrypoint_not_found", "container entrypoint could not be found"),
+    }
+    if result["returncode"] in container_failures:
+        failure_class, detail = container_failures[result["returncode"]]
+        return {
+            "schema_version": 1,
+            "identity": EVIDENCE_IDENTITY,
+            "operation": "system-build",
+            "repo": str(root),
+            "host": host_attr,
+            "success": False,
+            "status": "evidence_failed",
+            "backend": _evidence_backend(),
+            "failure": {
+                "class": failure_class,
+                "container_exit_code": result["returncode"],
+                "detail": detail,
+                "detail_truncated": result["stderr_truncated"],
+            },
             "observed_at": observed_at,
         }
     adapter_failures = {
