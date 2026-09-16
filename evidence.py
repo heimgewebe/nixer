@@ -175,7 +175,7 @@ class _RedactingLineMirror:
     def _secret_block_scalar_base_indent(text: str) -> int | None:
         logical = text.rstrip("\r\n")
         match = re.search(
-            r"""(?i)^(?P<indent>[ \t]*)(?P<sequence>-\s+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
+            r"""(?i)^(?P<indent>[ \t]*)(?P<sequence>(?:-\s+)+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
             logical,
         )
         if match is None:
@@ -543,7 +543,6 @@ def _bootspec_summary(
     if not isinstance(value, dict):
         return {**result, "summary_status": "ok", "format": "non-object-json"}
     result["summary_status"] = "ok"
-    result["top_level_keys"] = sorted(str(key) for key in value)
     v1 = value.get("org.nixos.bootspec.v1")
     if isinstance(v1, dict):
         safe_v1: dict[str, Any] = {}

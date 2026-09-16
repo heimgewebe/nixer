@@ -238,6 +238,31 @@ def test_pump_redacts_yaml_sequence_block_scalar_credential() -> None:
         assert live.count("<REDACTED>") >= 3
 
 
+def test_pump_redacts_nested_yaml_sequence_block_scalar_credential() -> None:
+    label = b"pass" + b"word"
+    cases = (
+        b"- - " + label + b": |\n      nested-secret\n    safe: visible\n- next: visible\n",
+        b"  - - - \"" + label + b"\": >2-\n          deeply-nested-secret\n        safe: visible\n  - next: visible\n",
+    )
+
+    for payload in cases:
+        stream = io.BytesIO(payload)
+        mirror = io.StringIO()
+        state = {"truncated": False}
+        captured = bytearray()
+
+        evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+        detail = captured.decode("utf-8", errors="replace")
+        live = mirror.getvalue()
+        for secret in ("nested-secret", "deeply-nested-secret"):
+            assert secret not in detail
+            assert secret not in live
+        for visible in ("safe: visible", "next: visible"):
+            assert visible in detail
+            assert visible in live
+
+
 def test_pump_redacts_quoted_label_value_continuation() -> None:
     key = b'"' + b"pass" + b"word" + b'"'
     stream = io.BytesIO(b"{" + key + b":\n" + b'"value-on-next-line"\n}')
@@ -387,12 +412,28 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
     assert summary["present"] is True
     assert summary["path"] == "/nix/store/system/boot.json"
-    assert summary["top_level_keys"] == ["foreign.extension", "org.nixos.bootspec.v1"]
+    assert "top_level_keys" not in summary
     assert summary["v1"]["kernel"] == "/nix/store/kernel"
     assert "bootspec-secret-value" not in summary["v1"]["label"]
     assert "<REDACTED>" in summary["v1"]["label"]
     assert "kernelParams" not in summary["v1"]
     assert "foreign.extension" not in summary
+
+
+def test_bootspec_summary_omits_arbitrary_top_level_keys() -> None:
+    secret_key = "to" + "ken=super-secret-top-level-value"
+    raw = json.dumps(
+        {
+            "org.nixos.bootspec.v1": {"kernel": "/nix/store/kernel"},
+            secret_key: {"extension": True},
+        }
+    )
+
+    summary = evidence._bootspec_summary(raw, "/nix/store/system/boot.json", size_bytes=len(raw))
+
+    assert "top_level_keys" not in summary
+    assert summary["v1"]["kernel"] == "/nix/store/kernel"
+    assert secret_key not in json.dumps(summary)
 
 
 def test_bootspec_summary_reports_omitted_oversized_file() -> None:
