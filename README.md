@@ -2,16 +2,16 @@
 
 Nixer ist der eng begrenzte Nix-Spezialist im Heimgewebe-Operator-Ökosystem.
 
-> Er macht nichts, er kann nichts, außer Nix. Und das sehr gut.
+> Er macht nichts außer Nix. Nix soll er dafür außergewöhnlich gut können.
 
-Der Dienst ist bewusst **kein** allgemeiner Operator. Er analysiert Nix, Nixpkgs und NixOS mit realer Evaluation, besitzt aber keine Repo-, PR-, Bureau-, Deploy- oder Service-Autorität.
+Nixer besitzt fachliche Nix-/Nixpkgs-/NixOS-Semantik, aber keinen operativen Lebenszyklus: keine Git-/PR-/Bureau-/Deploy-Autorität, keine eigenen langlebigen Tasks und keine Host-Aktivierung. Diese Grenze ist in [`AUTHORITY.md`](AUTHORITY.md) festgeschrieben.
 
-## v0
+## MCP v0
 
-Nixer v0 bietet einen kleinen, semantischen MCP-Werkzeugkatalog:
+Die öffentliche Fläche bleibt bewusst klein:
 
 - `nixer_status` — Scope, Verbote und Backend-Bereitschaft;
-- `flake_metadata` — reale Flake-Metadaten;
+- `flake_metadata` — reale Flake-Metadaten einschließlich Lock-/Inputgraph;
 - `flake_show` — reale Outputstruktur eines Flakes;
 - `flake_check` — Evaluation per `nix flake check --no-build`;
 - `eval_attr` — einen streng validierten Flake-Attributpfad evaluieren;
@@ -19,51 +19,74 @@ Nixer v0 bietet einen kleinen, semantischen MCP-Werkzeugkatalog:
 - `derivation_show` — resultierende Derivation anzeigen;
 - `build_dry_run` — Buildplan prüfen, ohne den Output zu realisieren.
 
-Es gibt absichtlich **kein** `run_shell_command` und keinen frei zusammensetzbaren Nix-ARGV-Endpunkt.
+Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. Beispielsweise lassen sich Optionswert, `definitionsWithLocations` und `declarationPositions` bereits über `nixos_option` und `eval_attr` gemeinsam untersuchen.
 
 ## Ausführungsmodell
 
-Der Heim-PC hat aktuell kein Host-Nix im normalen Ausführungspfad. Nixer verwendet daher denselben grundsätzlichen Trust-Ansatz wie der bestehende NixOS-Produktionspfad des `heim-pc`:
+Nix läuft in einem flüchtigen Container mit gepinntem Nix-Image. Der Container-Client wird genau einmal beim Nixer-Prozessstart gebunden:
 
-- Nix läuft in Docker;
-- das Image ist an eine unveränderliche Image-ID gebunden;
+- Standard: `/usr/bin/docker`;
+- optional: absoluter, betreiberseitig gesetzter Pfad über `NIXER_DOCKER_BIN`, etwa ein Nix-Store-Pfad zu Podman;
+- der MCP-Aufrufer kann den Executor nicht wählen oder verändern;
+- `_run` akzeptiert ausschließlich genau diesen einen gebundenen Client;
+- das Nix-Image bleibt an seine unveränderliche Image-ID gebunden;
 - das untersuchte Repository wird read-only unter `/workspace` eingehängt;
-- ein fest verdrahteter Bootstrap klont den exakten Git-HEAD in den flüchtigen, root-eigenen Snapshot `/tmp/nixer-workspace` und überlagert ausschließlich Änderungen an bereits getrackten Dateien; ungetrackte und ignorierte Dateien werden nie Teil der Nix-Flake-Quelle;
-- Nix evaluiert `git+file:///tmp/nixer-workspace`; saubere Checkouts behalten damit ihre echte Git-Revision, während getrackte lokale Änderungen als dirty Git-Quelle sichtbar bleiben;
-- der Container startet mit `--cap-drop=ALL` und erhält nur `CHOWN` sowie `DAC_READ_SEARCH`, die für den Single-User-Nix-Store beziehungsweise das read-only Lesen des Host-Checkouts über die UID-Grenze nötig sind;
-- Bash, Git und Nix werden ausschließlich über feste absolute Pfade aufgerufen; es gibt keinen frei steuerbaren Shell-Endpunkt;
-- keine Docker-Socket- oder sonstigen Hostmounts;
-- keine echten Builds oder Aktivierungen in v0.
+- bei Git-Linked-Worktrees wird nur das exakt aufgelöste gemeinsame Git-Verzeichnis zusätzlich read-only gemountet;
+- der Bootstrap klont HEAD, überlagert ausschließlich `git diff HEAD` und indiziert nur den dadurch entstandenen Wegwerf-Snapshot; Quell-untracked und ignorierte Dateien bleiben ausgeschlossen;
+- keine Container-Socket-Mounts in den Nix-Container;
+- `--cap-drop=ALL`, nur `CHOWN` und `DAC_READ_SEARCH`, `no-new-privileges`, `--rm`;
+- keine echten Builds oder Aktivierungen im synchronen MCP-v0.
 
-Das aktuell gebundene Image ist:
+Gebundenes Nix-Image:
 
 ```text
 sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
 ```
 
-Es entspricht dem im `heim-pc`-Produktionsvertrag verwendeten `nixos/nix:2.35.2`-Image. Nixer zieht dieses Image nicht selbst. Fehlt es lokal oder stimmt seine Identität nicht exakt, verweigert der Backend-Pfad die Ausführung. Der Host hält dieselbe verifizierte Image-ID zusätzlich unter dem lokalen Tag `nixos/nix:2.35.2`, damit ein gewöhnliches Pruning ungetaggter Images das Backend nicht erneut entfernt.
+Das entspricht `nixos/nix:2.35.2`. Nixer zieht oder aktualisiert das Image nie selbst und scheitert bei fehlender oder abweichender Identität fail-closed.
 
-## Scope
+## Nix-Paket und NixOS-Modul
 
-Geeignet:
+Nixer ist zusätzlich selbst als Flake paketiert:
 
-- Warum gewinnt eine bestimmte NixOS-Definition?
-- Welcher Wert kommt bei `services.foo.enable` tatsächlich heraus?
-- Welche Flake-Outputs existieren?
-- Welche Derivation entsteht aus einem Installable?
-- Was würde ein Nix-Build realisieren?
-- Ist ein Problem tatsächlich Nix-semantisch?
+```text
+packages.x86_64-linux.default
+packages.x86_64-linux.nixer
+nixosModules.default
+checks.x86_64-linux.package
+```
 
-Nicht geeignet:
+Das Paket installiert den ausführbaren `nixer`-Wrapper. Das NixOS-Modul stellt `services.nixer` bereit und erzeugt einen loopback-only systemd-User-Service. Host-spezifische Policy — konkrete Aktivierung, Port, Container-Client, Tunnel und Ressourcen — gehört in das jeweilige Host-Repository, nicht in die Nixer-Fachlogik.
 
-- PR mergen;
-- GitHub bearbeiten;
-- Linux-Dienste reparieren;
-- Bureau-Arbeit übernehmen;
-- NixOS produktiv umschalten;
-- Deployments durchführen.
+Beispiel:
 
-Die vollständige Grenze steht in [`AUTHORITY.md`](AUTHORITY.md).
+```nix
+{
+  imports = [ inputs.nixer.nixosModules.default ];
+  services.nixer = {
+    enable = true;
+    port = 18187;
+  };
+}
+```
+
+Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Container-Client; ein Host kann `services.nixer.containerCli` explizit überschreiben. Das gepinnte Nix-Image muss im gewählten Runtime-Store bereits vorhanden sein.
+
+## Geeignet
+
+- resultierende NixOS-Optionen und ihre Definitionsherkunft untersuchen;
+- Flake-Inputs, Lockgraphen und Outputs auswerten;
+- Overlays, Overrides und Derivationen nachvollziehen;
+- Buildpläne per Dry-Run prüfen;
+- entscheiden, ob ein Fehler tatsächlich Nix-semantisch ist.
+
+## Nicht geeignet
+
+- Repositories verändern oder PRs mergen;
+- Bureau-Arbeit oder Work-Lanes übernehmen;
+- langlebige Jobs selbst verwalten;
+- NixOS produktiv umschalten oder installieren;
+- Dienste reparieren oder Deployments durchführen.
 
 ## Entwicklung
 
@@ -71,6 +94,7 @@ Die vollständige Grenze steht in [`AUTHORITY.md`](AUTHORITY.md).
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest
+.venv/bin/ruff check server.py tests
 ```
 
 Lokal per stdio:
@@ -85,26 +109,10 @@ HTTP bindet ausschließlich Loopback:
 .venv/bin/python server.py --transport streamable-http --host 127.0.0.1 --port 18187
 ```
 
-Der reale Fachpfad ist mit dem `heim-pc`-Flake belegt: `flake_show` und `flake_check --no-build` wurden über den Nixer-MCP erfolgreich gegen die gepinnte Backend-Image-ID ausgeführt.
+Die Flake-Evaluation ist auch aus Grabowski-Linked-Worktrees unterstützt; deren Git-Common-Dir wird nur read-only für die Snapshot-Erzeugung sichtbar gemacht.
 
-## Lokaler Dienst und Tunnel
+## Übergangs-Deployment
 
-Nixer läuft als loopback-only User-Service auf `127.0.0.1:18187`. Die versionierte Unit liegt unter `deploy/nixer-mcp.service`.
+Die bisherigen Dateien unter `deploy/` bleiben vorerst erhalten, weil der derzeit laufende Dienst noch daraus installiert ist. Sie sind eine Übergangsoberfläche, bis der konkrete Host Nixer über `nixosModules.default` und eine gepinnte Flake-Revision betreibt.
 
-Der dazugehörige OpenAI-Tunnel ist separat versioniert:
-
-- `deploy/nixer.yaml` — Tunnelprofil mit MCP-Ziel `http://127.0.0.1:18187/mcp`;
-- `deploy/tunnel-client-nixer.service` — User-Service für den Tunnel-Client.
-
-Die ChatGPT-Plugin-/Connector-Erstellung bleibt bewusst eine manuelle Benutzeraktion, damit Name, Beschreibung und Bild im ChatGPT-UI gewählt werden können. Weder Nixer noch Grabowski erstellen den ChatGPT-Connector selbst.
-
-Auf einem frischen Host müssen die versionierten Units zuerst in den systemd-User-Suchpfad verlinkt und das Tunnelprofil installiert werden. Der Tunnel-Service erwartet außerdem die lokal provisionierte Datei `~/.config/tunnel-client/grabowski-runtime.env` mit `CONTROL_PLANE_API_KEY`; Secret-Provisionierung ist nicht Teil dieses Repositories.
-
-```bash
-mkdir -p "$HOME/.config/tunnel-client"
-install -m 0600 deploy/nixer.yaml "$HOME/.config/tunnel-client/nixer.yaml"
-systemctl --user link "$PWD/deploy/nixer-mcp.service"
-systemctl --user link "$PWD/deploy/tunnel-client-nixer.service"
-systemctl --user daemon-reload
-systemctl --user enable --now nixer-mcp.service tunnel-client-nixer.service
-```
+Der OpenAI-Tunnel bleibt eine separate Host-/Betriebsintegration. Secret-Provisionierung und ChatGPT-Connector-Erstellung gehören ausdrücklich nicht zum Nixer-Repo.

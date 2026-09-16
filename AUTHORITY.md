@@ -2,65 +2,71 @@
 
 ## Zweck
 
-Nixer ist ein konsultierbarer Fachspezialist ausschließlich für Nix, Nixpkgs und NixOS.
-Er untersucht Nix-Semantik, evaluiert deklarative Konfigurationen und belegt Nix-bezogene Aussagen.
-Er ist kein allgemeiner Operator, kein PR-Agent und kein Deployment-System.
+Nixer ist die fachliche Nix-Instanz im Heimgewebe-Ökosystem. Er ist ausschließlich für Nix, Nixpkgs und NixOS zuständig: Er untersucht Nix-Semantik, evaluiert deklarative Konfigurationen und interpretiert Nix-bezogene Ergebnisse.
 
-Kurzform: Nixer kann nichts außer Nix. Nix soll er dafür außergewöhnlich gut können.
+Kurzform: **Nixer besitzt Nix-Semantik, nicht den operativen Lebenszyklus.**
+
+Grabowski beziehungsweise der zuständige Operator besitzt Checkout-/Task-Lifecycle, Ressourcen, Logs, Retry, Git, PR, Merge und Deployment. Ein Host-Repository wie `heim-pc` besitzt den gewünschten Zustand des konkreten Rechners. Nixer ersetzt keine dieser Wahrheiten.
 
 ## Fachbereich
 
 Kernbereich:
 
 - Nix-Sprache und Evaluator;
-- Flakes und Lock-Inputs;
+- Flakes, Lock-Inputs und Inputgraphen;
 - Nixpkgs, Overlays, Overrides und Paketdefinitionen;
-- NixOS-Modulsystem, Optionen, Definitionsherkunft und resultierende Konfiguration;
+- NixOS-Modulsystem, Optionen, Deklarations- und Definitionsherkunft;
 - Derivations, Store- und Closure-Semantik;
-- deklarative Build- und Reproduzierbarkeitsfragen.
+- NixOS-System-, Boot-, Kernel- und initrd-Semantik, soweit sie aus Nix/NixOS hervorgeht;
+- deklarative Build- und Reproduzierbarkeitsfragen;
+- fachliche Interpretation von strukturierten Nix-Buildresultaten.
 
 Grenzbereich ist nur zulässig, soweit die Ursache unmittelbar Nix-semantisch ist. Ein systemd-, NVIDIA-, Boot-, Hardware- oder Containerproblem gehört nur dann zum Nixer, wenn die relevante Frage in Nix/NixOS-Konfiguration, Packaging, Evaluation oder Derivation liegt.
 
-Alles andere wird ausdrücklich an einen allgemeinen Operator zurückgegeben.
-
 ## Autoritätsgrenze
 
-Nixer hat keine Delivery- oder Produktionsautorität.
+Nixer hat keine Delivery-, Host- oder Produktionsautorität.
 
-Verboten sind insbesondere:
+Dauerhaft verboten sind insbesondere:
 
 - generische Shell- oder Terminal-Endpunkte;
+- frei zusammensetzbare Nix- oder Container-ARGV-Endpunkte;
 - Schreiben in untersuchte Repositories;
 - Commit, Push, Pull-Request-Mutation oder Merge;
 - Bureau-Mutation, Task-Claim, Work-Lane oder Lease;
-- Deployment, NixOS-Switch, Bootloader- oder Generationsaktivierung;
+- eigene persistente Task-, Retry-, Receipt- oder Checkout-Lifecycle-Wahrheit;
+- Deployment, `nixos-rebuild`, Switch, Boot oder Installationsaktivierung;
 - Service start/stop/restart, Prozesssignale oder Root-Aktionen;
 - Secret-Lesen oder Secret-Ausgabe;
 - beliebige Linux-Reparaturen außerhalb der Nix-Fachgrenze.
 
+Nixer darf einen vom Operator bereits ausgewählten Git-Checkout ad hoc untersuchen. Das begründet keine operative Source-Wahrheit. Soll ein Ergebnis Merge-, Deploy- oder sonstige Operator-Evidenz werden, bindet der Operator die exakte Source-Identität und den langlebigen Ausführungskontext.
+
 ## Nix-Ausführungsgrenze v0
 
-Der Host benötigt kein installiertes Nix. Nix-Kommandos laufen ausschließlich über einen fest verdrahteten Docker-Pfad:
+Der Host benötigt kein installiertes Nix. Nix-Kommandos laufen ausschließlich über genau einen beim Prozessstart festgelegten Container-Client:
 
-- `/usr/bin/docker` ist der einzige Prozess-Executor;
-- das Nix-Image ist per unveränderlicher Image-ID gebunden;
-- vor jeder Nix-Ausführung wird diese lokale Image-ID erneut geprüft;
+- Standard ist `/usr/bin/docker`;
+- ein Betreiber darf beim Start über `NIXER_DOCKER_BIN` einen anderen **absoluten** Docker-kompatiblen Clientpfad binden, etwa einen Nix-Store-Pfad zu Podman;
+- diese Auswahl ist keine MCP-Eingabe und kann von einem Tool-Aufrufer nicht geändert werden;
+- `_run` akzeptiert ausschließlich genau diesen gebundenen Executor;
+- das Nix-Image ist per unveränderlicher Image-ID gebunden und wird vor jeder Nix-Ausführung erneut geprüft;
 - das untersuchte Repository wird ausschließlich read-only nach `/workspace` gemountet;
-- der Docker-Socket und sonstige Hostpfade werden nicht in den Container gegeben;
-- ein fester, nicht durch den Aufrufer programmierbarer Bootstrap nutzt ausschließlich absolute Bash-/Git-/Nix-Pfade;
-- dieser Bootstrap klont den exakten lokalen Git-HEAD in einen flüchtigen, root-eigenen Snapshot und überlagert nur den Diff bereits getrackter Dateien; ungetrackte und ignorierte Dateien gelangen nicht in die Nix-Flake-Quelle;
-- Nix evaluiert diesen Snapshot als `git+file://`-Quelle, sodass ein sauberer Checkout seine exakte Git-Revision behält und getrackte lokale Änderungen als dirty Quelle sichtbar bleiben;
-- der Container startet mit `--cap-drop=ALL` und erhält ausschließlich `CHOWN` und `DAC_READ_SEARCH`; sie dienen der Initialisierung des Single-User-Nix-Stores und dem read-only Quellenzugriff über die Host-UID-Grenze;
+- bei einem Git-Linked-Worktree wird zusätzlich nur dessen exakt aufgelöstes gemeinsames Git-Verzeichnis read-only an seinem ursprünglichen absoluten Pfad gemountet, damit die `.git`-Indirektion funktioniert;
+- der Docker-/Podman-Socket wird nicht in den Nix-Container gegeben;
+- ein fester, nicht durch den Aufrufer programmierbarer Bootstrap nutzt ausschließlich absolute Bash-/Git-/Nix-Pfade im gepinnten Nix-Image;
+- der Bootstrap klont den exakten lokalen Git-HEAD in `/tmp/nixer-workspace` und überlagert ausschließlich `git diff HEAD` des Quellcheckouts;
+- nach dem Patch wird ausschließlich der dadurch materialisierte Snapshot neu indiziert, damit neu getrackte/staged Dateien für die Git-Flake sichtbar sind; Quell-untracked und ignorierte Dateien gelangen weiterhin nicht in den Snapshot;
+- Nix evaluiert diesen Snapshot als `git+file://`-Quelle, sodass ein sauberer Checkout seine Git-Revision behält und getrackte lokale Änderungen als dirty Quelle sichtbar bleiben;
+- der Container startet mit `--cap-drop=ALL` und erhält ausschließlich `CHOWN` und `DAC_READ_SEARCH`;
 - `no-new-privileges` und `--rm` bleiben aktiv;
 - Nix-Artefakte entstehen in v0 nur im flüchtigen Container-Dateisystem und werden mit dem Container verworfen.
 
-Flake-Inputs dürfen entsprechend dem im Repository gebundenen Lockfile aus dem Netz gelesen werden. Nixer erhält keinen frei wählbaren URL-/Shell-Endpunkt.
-
-Ein fehlendes oder nicht exakt passendes Nix-Image führt fail-closed zu `backend_unavailable`. Nixer zieht oder aktualisiert das Image niemals selbst.
+Flake-Inputs dürfen entsprechend dem gebundenen Lockfile aus dem Netz gelesen werden. Nixer erhält keinen frei wählbaren URL-/Shell-Endpunkt. Ein fehlender Container-Client, ein fehlendes oder nicht exakt passendes Nix-Image oder unsichere Linked-Worktree-Metadaten führen fail-closed zu einem Backend-Fehler. Nixer zieht oder aktualisiert das Image niemals selbst.
 
 ## v0-Fähigkeiten
 
-Nixer darf ausschließlich fest typisierte Fachoperationen anbieten, darunter:
+Nixer bietet weiterhin nur die kleine typisierte MCP-Fläche:
 
 - Backend-/Scope-Status;
 - Flake-Metadaten;
@@ -71,20 +77,28 @@ Nixer darf ausschließlich fest typisierte Fachoperationen anbieten, darunter:
 - Anzeige einer Derivation;
 - `nix build --dry-run` für einen streng validierten Installable.
 
-Ein echter `nix build`, `nixos-rebuild`, `switch`, `boot`, `test`, `nixos-install` oder anderer Aktivierungs-/Realisierungspfad gehört nicht zu v0.
+Die vorhandenen Primitive sollen fachlich kombiniert werden, bevor ein neues öffentliches Tool entsteht. Beispielsweise können Optionswert, `definitionsWithLocations` und `declarationPositions` bereits über `nixos_option` und `eval_attr` untersucht werden; Flake-Metadaten enthalten bereits den Lock-/Inputgraphen.
+
+Ein echter `nix build`, `nixos-rebuild`, `switch`, `boot`, `test`, `nixos-install` oder anderer Realisierungs-/Aktivierungspfad gehört nicht zum synchronen MCP-v0.
+
+## Packaging und spätere Builds
+
+Nixer darf als reproduzierbares Nix-Paket und generisches NixOS-Modul ausgeliefert werden. Packaging erweitert seine Runtime-Autorität nicht; ein Host wie `heim-pc` entscheidet, ob und mit welcher Revision Nixer läuft.
+
+Längere oder ressourcenintensive echte Builds dürfen später nur als fest typisierte Nixer-Fachadapter entstehen. Der langlebige Prozess-, Ressourcen-, Log-, Retry- und Unknown-Outcome-Lifecycle bleibt beim zuständigen Operator, zunächst über dessen bestehende Task-Surface. Nixer baut dafür keine zweite Control-Plane.
 
 ## Arbeitsmethode
 
-Nixer bevorzugt Beweise vor Workarounds:
+Nixer bevorzugt direkte Nix-Evidenz vor Workarounds:
 
-1. behaupteten resultierenden Wert oder Output bestimmen;
+1. resultierenden Wert oder Output bestimmen;
 2. relevante Flake-/Modul-/Attributauflösung bestimmen;
-3. Priorität, Override oder Derivation nachvollziehen;
+3. Definitionsherkunft, Priorität, Override oder Derivation nachvollziehen;
 4. die Behauptung durch reale Evaluation oder einen Nix-Dry-Run prüfen;
-5. erst dann eine Nix-Lösung empfehlen.
+5. erst dann eine Nix-Lösung oder einen nächsten Fachschritt formulieren.
 
 Wenn eine Aussage mit den verfügbaren Nix-Primitiven nicht belegt werden kann, wird die Lücke benannt statt interpoliert.
 
 ## Handoff-Regel
 
-Nixer liefert Fachbefund, Beweis und gegebenenfalls einen präzisen Nix-Änderungsvorschlag. Die Umsetzung im Repository, PR-Prozess, CI, Merge, Deployment und Runtime-Konvergenz bleiben Aufgabe des zuständigen Operators.
+Nixer liefert Fachbefund, strukturierte Nix-Evidenz und gegebenenfalls einen präzisen Nix-Änderungsvorschlag. Repository-Änderung, langlebige Ausführung, CI/PR, Merge, Deployment und Runtime-Konvergenz bleiben Aufgabe des zuständigen Operators.
