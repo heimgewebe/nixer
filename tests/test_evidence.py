@@ -159,6 +159,28 @@ def test_pump_redacts_yaml_block_scalar_with_modifiers() -> None:
     assert live.count("<REDACTED>") >= 3
 
 
+def test_pump_redacts_yaml_sequence_block_scalar_credential() -> None:
+    label = b"pass" + b"word"
+    stream = io.BytesIO(
+        b"  - " + label + b": |\n      list-secret-one\n      list-secret-two\n  - safe: visible\n"
+    )
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 4096, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    for secret in ("list-secret-one", "list-secret-two"):
+        assert secret not in detail
+        assert secret not in live
+    assert "safe: visible" in detail
+    assert "safe: visible" in live
+    assert detail.count("<REDACTED>") >= 3
+    assert live.count("<REDACTED>") >= 3
+
+
 def test_pump_redacts_quoted_label_value_continuation() -> None:
     key = b'"' + b"pass" + b"word" + b'"'
     stream = io.BytesIO(b"{" + key + b":\n" + b'"value-on-next-line"\n}')

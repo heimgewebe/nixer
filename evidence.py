@@ -174,7 +174,7 @@ class _RedactingLineMirror:
     def _secret_block_scalar_base_indent(text: str) -> int | None:
         logical = text.rstrip("\r\n")
         match = re.search(
-            r"""(?i)^(?P<indent>[ \t]*)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
+            r"""(?i)^(?P<indent>[ \t]*)(?:-\s+)?(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
             logical,
         )
         if match is None:
