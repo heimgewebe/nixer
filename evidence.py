@@ -152,6 +152,7 @@ class _RedactingLineMirror:
         self.private_key_block = False
         self.secret_value_continuation = False
         self.secret_quoted_value_quote: str | None = None
+        self.secret_block_scalar_base_indent: int | None = None
         self.disabled = False
 
     @staticmethod
@@ -168,6 +169,17 @@ class _RedactingLineMirror:
                 logical,
             )
         )
+
+    @staticmethod
+    def _secret_block_scalar_base_indent(text: str) -> int | None:
+        logical = text.rstrip("\r\n")
+        match = re.search(
+            r"""(?i)^(?P<indent>[ \t]*)(?P<key_quote>["']?)(?:authorization|api[_-]?key|token|password|secret)(?P=key_quote)\s*[:=]\s*[|>](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$""",
+            logical,
+        )
+        if match is None:
+            return None
+        return len(match.group("indent"))
 
     @staticmethod
     def _find_unescaped_quote(text: str, quote: str) -> int | None:
@@ -215,6 +227,19 @@ class _RedactingLineMirror:
             self.private_key_block = (self.private_key_block or begin) and not end
             self.secret_value_continuation = False
             self.secret_quoted_value_quote = None
+            self.secret_block_scalar_base_indent = None
+        elif self.secret_block_scalar_base_indent is not None:
+            logical = text[: -len(ending)] if ending else text
+            if not logical.strip():
+                self.mirror.write(ending)
+            else:
+                indent = len(logical) - len(logical.lstrip())
+                if indent > self.secret_block_scalar_base_indent:
+                    self.mirror.write("<REDACTED>" + ending)
+                else:
+                    self.secret_block_scalar_base_indent = None
+                    self._emit_line(raw)
+                    return
         elif self.secret_quoted_value_quote is not None:
             logical = text[: -len(ending)] if ending else text
             closing = self._find_unescaped_quote(logical, self.secret_quoted_value_quote)
@@ -237,8 +262,14 @@ class _RedactingLineMirror:
             else:
                 self.mirror.write(ending)
         else:
+            block_scalar_indent = self._secret_block_scalar_base_indent(text)
             quoted_value = self._secret_quoted_value_start(text)
-            if quoted_value is not None:
+            if block_scalar_indent is not None:
+                self.mirror.write("<REDACTED>" + ending)
+                self.secret_block_scalar_base_indent = block_scalar_indent
+                self.secret_quoted_value_quote = None
+                self.secret_value_continuation = False
+            elif quoted_value is not None:
                 self.mirror.write("<REDACTED>" + ending)
                 self.secret_quoted_value_quote = quoted_value
                 self.secret_value_continuation = False
