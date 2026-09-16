@@ -41,7 +41,7 @@ Das aktuell gebundene Image ist:
 sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
 ```
 
-Es entspricht dem im `heim-pc`-Produktionsvertrag verwendeten `nixos/nix:2.35.2`-Image. Nixer zieht dieses Image nicht selbst. Fehlt es lokal oder stimmt seine Identität nicht exakt, verweigert der Backend-Pfad die Ausführung.
+Es entspricht dem im `heim-pc`-Produktionsvertrag verwendeten `nixos/nix:2.35.2`-Image. Nixer zieht dieses Image nicht selbst. Fehlt es lokal oder stimmt seine Identität nicht exakt, verweigert der Backend-Pfad die Ausführung. Der Host hält dieselbe verifizierte Image-ID zusätzlich unter dem lokalen Tag `nixos/nix:2.35.2`, damit ein gewöhnliches Pruning ungetaggter Images das Backend nicht erneut entfernt.
 
 ## Scope
 
@@ -85,15 +85,26 @@ HTTP bindet ausschließlich Loopback:
 .venv/bin/python server.py --transport streamable-http --host 127.0.0.1 --port 18187
 ```
 
-Ein produktiver Tunnel oder ChatGPT-Plugin-Publish ist **nicht Teil von v0**, bevor der Fachpfad mit realen Nix-Fällen bewiesen wurde.
+Der reale Fachpfad ist mit dem `heim-pc`-Flake belegt: `flake_show` und `flake_check --no-build` wurden über den Nixer-MCP erfolgreich gegen die gepinnte Backend-Image-ID ausgeführt.
 
-## Lokaler Dienst
+## Lokaler Dienst und Tunnel
 
-Nach erfolgreichem Fachpfad kann Nixer als loopback-only User-Service auf `127.0.0.1:18187` laufen. Die versionierte Unit liegt unter `deploy/nixer-mcp.service`. Sie veröffentlicht Nixer nicht ins LAN oder Internet; ein Tunnel oder ChatGPT-Plugin bleibt ein separater, ausdrücklich zu prüfender Schritt.
+Nixer läuft als loopback-only User-Service auf `127.0.0.1:18187`. Die versionierte Unit liegt unter `deploy/nixer-mcp.service`.
 
-Installation auf dem Heim-PC:
+Der dazugehörige OpenAI-Tunnel ist separat versioniert:
+
+- `deploy/nixer.yaml` — Tunnelprofil mit MCP-Ziel `http://127.0.0.1:18187/mcp`;
+- `deploy/tunnel-client-nixer.service` — User-Service für den Tunnel-Client.
+
+Die ChatGPT-Plugin-/Connector-Erstellung bleibt bewusst eine manuelle Benutzeraktion, damit Name, Beschreibung und Bild im ChatGPT-UI gewählt werden können. Weder Nixer noch Grabowski erstellen den ChatGPT-Connector selbst.
+
+Auf einem frischen Host müssen die versionierten Units zuerst in den systemd-User-Suchpfad verlinkt und das Tunnelprofil installiert werden. Der Tunnel-Service erwartet außerdem die lokal provisionierte Datei `~/.config/tunnel-client/grabowski-runtime.env` mit `CONTROL_PLANE_API_KEY`; Secret-Provisionierung ist nicht Teil dieses Repositories.
 
 ```bash
+mkdir -p "$HOME/.config/tunnel-client"
+install -m 0600 deploy/nixer.yaml "$HOME/.config/tunnel-client/nixer.yaml"
 systemctl --user link "$PWD/deploy/nixer-mcp.service"
-systemctl --user enable --now nixer-mcp.service
+systemctl --user link "$PWD/deploy/tunnel-client-nixer.service"
+systemctl --user daemon-reload
+systemctl --user enable --now nixer-mcp.service tunnel-client-nixer.service
 ```

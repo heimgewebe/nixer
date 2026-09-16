@@ -1,0 +1,28 @@
+[Unit]
+Description=Nixer MCP Tunnel
+After=network-online.target nixer-mcp.service
+Wants=network-online.target nixer-mcp.service
+PartOf=nixer-mcp.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/tunnel-client/grabowski-runtime.env
+WorkingDirectory=%h
+ExecStartPre=/usr/bin/systemctl --user is-active --quiet nixer-mcp.service
+ExecStart=%h/.local/bin/tunnel-client run --profile nixer
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=20
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target
