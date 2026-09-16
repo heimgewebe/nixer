@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -144,6 +145,7 @@ class _RedactingLineMirror:
         self.mirror = mirror
         self.pending = bytearray()
         self.private_key_block = False
+        self.secret_value_continuation = False
         self.disabled = False
 
     @staticmethod
@@ -151,13 +153,42 @@ class _RedactingLineMirror:
         upper = text.upper()
         return f"-----{kind} " in upper and "PRIVATE KEY-----" in upper
 
+    @staticmethod
+    def _secret_label_without_value(text: str) -> bool:
+        logical = text.rstrip("\r\n")
+        return bool(
+            re.search(
+                r"(?i)(?:authorization|api[_-]?key|token|password|secret)\s*[:=]\s*$",
+                logical,
+            )
+        )
+
+    @staticmethod
+    def _line_ending(text: str) -> str:
+        if text.endswith("\r\n"):
+            return "\r\n"
+        if text.endswith("\n"):
+            return "\n"
+        return ""
+
     def _emit_line(self, raw: bytes) -> None:
         text = raw.decode("utf-8", errors="replace")
+        ending = self._line_ending(text)
         begin = self._private_key_marker(text, "BEGIN")
         end = self._private_key_marker(text, "END")
         if self.private_key_block or begin:
-            self.mirror.write("<REDACTED_PRIVATE_KEY_BLOCK>\n")
+            self.mirror.write("<REDACTED_PRIVATE_KEY_BLOCK>" + ending)
             self.private_key_block = (self.private_key_block or begin) and not end
+            self.secret_value_continuation = False
+        elif self.secret_value_continuation:
+            if text.rstrip("\r\n").strip():
+                self.mirror.write("<REDACTED>" + ending)
+                self.secret_value_continuation = False
+            else:
+                self.mirror.write(ending)
+        elif self._secret_label_without_value(text):
+            self.mirror.write("<REDACTED>" + ending)
+            self.secret_value_continuation = True
         else:
             self.mirror.write(server._redact(text))
         self.mirror.flush()

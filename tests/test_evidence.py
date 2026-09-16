@@ -73,6 +73,41 @@ def test_pump_redacts_structured_tail_before_eviction() -> None:
     assert "super-secret-value" not in mirror.getvalue()
 
 
+def test_pump_redacts_secret_value_continuation_across_lines() -> None:
+    stream = io.BytesIO(
+        b"prefix\npassword=\nordinary-sensitive-value\ntrailer\n"
+    )
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 128, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    live = mirror.getvalue()
+    assert "ordinary-sensitive-value" not in detail
+    assert "ordinary-sensitive-value" not in live
+    assert "password=" not in detail
+    assert "password=" not in live
+    assert detail.count("<REDACTED>") >= 2
+    assert live.count("<REDACTED>") >= 2
+    assert "trailer" in detail
+    assert "trailer" in live
+
+
+def test_pump_preserves_secret_continuation_across_blank_line() -> None:
+    stream = io.BytesIO(b"token:\n\nsecret-on-next-nonempty-line\n")
+    mirror = io.StringIO()
+    state = {"truncated": False}
+    captured = bytearray()
+
+    evidence._pump(stream, captured, 128, state, mirror=mirror, keep_tail=True)
+
+    detail = captured.decode("utf-8", errors="replace")
+    assert "secret-on-next-nonempty-line" not in detail
+    assert "secret-on-next-nonempty-line" not in mirror.getvalue()
+
+
 def test_redacting_line_mirror_redacts_across_chunk_boundary() -> None:
     mirror = io.StringIO()
     redactor = evidence._RedactingLineMirror(mirror)
