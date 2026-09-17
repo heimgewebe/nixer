@@ -56,7 +56,7 @@ nixosModules.default
 checks.x86_64-linux.package
 ```
 
-Das Paket installiert den ausführbaren `nixer`-Wrapper. Das NixOS-Modul stellt `services.nixer` bereit und erzeugt einen loopback-only systemd-User-Service. Host-spezifische Policy — konkrete Aktivierung, Port, Container-Client, Tunnel und Ressourcen — gehört in das jeweilige Host-Repository, nicht in die Nixer-Fachlogik.
+Das Paket installiert `nixer` für den MCP-Dienst und `nixer-evidence` für fest typisierte, operatorgeführte Realisierungsabläufe. Das NixOS-Modul stellt `services.nixer` bereit und erzeugt einen loopback-only systemd-User-Service. Host-spezifische Policy — konkrete Aktivierung, Port, Container-Client, Tunnel und Ressourcen — gehört in das jeweilige Host-Repository, nicht in die Nixer-Fachlogik.
 
 Beispiel:
 
@@ -72,12 +72,36 @@ Beispiel:
 
 Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Container-Client; ein Host kann `services.nixer.containerCli` explizit überschreiben. Das gepinnte Nix-Image muss im gewählten Runtime-Store bereits vorhanden sein.
 
+## Evidence-Adapter v1
+
+Der erste Realisierungsadapter bleibt bewusst außerhalb des MCP-Lifecycles:
+
+```text
+nixer-evidence system-build --repo /path/to/repo --host heim-pc
+```
+
+`system-build` ist fest auf `nixosConfigurations.<host>.config.system.build.toplevel` gebunden. Es gibt keinen freien Nix-Ausdruck, kein beliebiges Nix-ARGV und kein beliebiges Containerkommando. Der Adapter verwendet dieselbe read-only Snapshot-Semantik und dasselbe gepinnte Nix-Image wie MCP v0, realisiert den System-Toplevel im flüchtigen Container-Store und gibt ein strukturiertes JSON-Ergebnis zurück.
+
+Für Realisierungen bleibt die Container-Capability-Menge eng: `SETUID` und `SETGID` werden nicht ergänzt. Der Evidence-Container erhält zusätzlich zu `CHOWN` und `DAC_READ_SEARCH` genau `FOWNER` und `DAC_OVERRIDE`: `FOWNER` ist für Nix' Modusänderungen an numerischen Build-UIDs nötig; `DAC_OVERRIDE` ist für das anschließende Aufräumen fremdbesessener Buildbäume nötig. Beide Lücken wurden gegen die konkreten `chmod`-/`unlink`-Fehler im Wegwerfcontainer einzeln reproduziert. Repository-Mount und Git-Metadaten bleiben read-only, der Docker-Socket bleibt abwesend, `no-new-privileges` und `--cap-drop=ALL` bleiben aktiv. Nix läuft zugleich mit deaktivierter Build-User-Umschaltung (`build-users-group = ""`). MCP v0 behält seine kleinere Capability-Menge ohne `FOWNER` und `DAC_OVERRIDE`.
+
+Die Ausgabe enthält insbesondere:
+
+- beobachteten Git-HEAD und Dirty-Status der untersuchten Source — ausdrücklich nur Beobachtung, keine Source-Authority;
+- realisierten System-Toplevel;
+- Closure-Größe und `path-info`;
+- Kernel- und initrd-Storepfad;
+- eine begrenzte sichere Zusammenfassung von `boot.json`, falls vorhanden;
+- bei Fehlern eine begrenzte Nix-spezifische Fehlerklassifikation.
+
+Der langlebige Prozess gehört weiterhin dem Operator. In Heimgewebe startet daher Grabowski `nixer-evidence` als Task und besitzt Laufzeit, CPU/RAM/IO, Logs, Cancel, Retry und Unknown-Outcome-Behandlung. Nixer führt dafür keine eigene Task-, Lease-, Receipt- oder Retry-Wahrheit ein.
+
 ## Geeignet
 
 - resultierende NixOS-Optionen und ihre Definitionsherkunft untersuchen;
 - Flake-Inputs, Lockgraphen und Outputs auswerten;
 - Overlays, Overrides und Derivationen nachvollziehen;
 - Buildpläne per Dry-Run prüfen;
+- einen operatorgebundenen NixOS-Systembuild fachlich realisieren und auswerten;
 - entscheiden, ob ein Fehler tatsächlich Nix-semantisch ist.
 
 ## Nicht geeignet
@@ -85,6 +109,7 @@ Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Co
 - Repositories verändern oder PRs mergen;
 - Bureau-Arbeit oder Work-Lanes übernehmen;
 - langlebige Jobs selbst verwalten;
+- beliebige Nix-/Shell-/Container-Kommandos ausführen;
 - NixOS produktiv umschalten oder installieren;
 - Dienste reparieren oder Deployments durchführen.
 
@@ -94,7 +119,7 @@ Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Co
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest
-.venv/bin/ruff check server.py tests
+.venv/bin/ruff check server.py evidence.py tests
 ```
 
 Lokal per stdio:

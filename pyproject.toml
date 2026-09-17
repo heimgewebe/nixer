@@ -1,7 +1,7 @@
 [project]
 name = "nixer"
-version = "0.1.0"
-description = "Nix-only specialist MCP for Nix, Nixpkgs and NixOS"
+version = "0.2.0"
+description = "Nix-only specialist MCP and fixed evidence adapter for Nix/Nixpkgs/NixOS"
 requires-python = ">=3.10"
 dependencies = ["mcp==1.30.0"]
 
@@ -9,7 +9,7 @@ dependencies = ["mcp==1.30.0"]
 dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
 
 [tool.setuptools]
-py-modules = ["server"]
+py-modules = ["server", "evidence"]
 
 [tool.ruff]
 line-length = 100

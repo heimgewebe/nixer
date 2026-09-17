@@ -7,13 +7,18 @@ import server
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_flake_exports_package_and_nixos_module() -> None:
+def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     source = (ROOT / "flake.nix").read_text(encoding="utf-8")
     assert "packages = forAllSystems" in source
     assert "nixosModules.default" in source
     assert "checks = forAllSystems" in source
+    assert 'version = "0.2.0"' in source
     assert 'version = "1.30.0"' in source
     assert "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=" in source
+    assert 'pytestFlags = (old.pytestFlags or [ ]) ++ [ "-n" "0" ];' in source
+    assert '"test_ws_client_exception_handling"' not in source
+    assert "cp ${./evidence.py}" in source
+    assert '"$out/bin/nixer-evidence"' in source
 
 
 def test_nixos_module_keeps_mcp_loopback_only() -> None:
@@ -42,8 +47,15 @@ def test_packaging_does_not_add_activation_authority() -> None:
         [
             (ROOT / "flake.nix").read_text(encoding="utf-8"),
             (ROOT / "nix" / "module.nix").read_text(encoding="utf-8"),
+            (ROOT / "evidence.py").read_text(encoding="utf-8"),
         ]
     )
     assert "nixos-rebuild" not in combined
     assert "nixos-install" not in combined
     assert " switch " not in combined
+
+
+def test_evidence_adapter_does_not_expand_mcp_surface() -> None:
+    source = (ROOT / "server.py").read_text(encoding="utf-8")
+    assert '@mcp.tool(name="system_build"' not in source
+    assert '@mcp.tool(name="system-build"' not in source
