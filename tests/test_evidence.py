@@ -560,8 +560,8 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
         {
             "org.nixos.bootspec.v1": {
                 "label": "password: 'correct horse''s battery staple'",
-                "kernel": "/nix/store/kernel",
-                "initrd": "/nix/store/initrd",
+                "kernel": "/nix/store/kernel/bzImage",
+                "initrd": "/nix/store/initrd/initrd",
                 "toplevel": "/nix/store/system",
                 "kernelParams": ["example.secret=do-not-return"],
             },
@@ -581,7 +581,8 @@ def test_bootspec_summary_exposes_only_safe_v1_fields() -> None:
     assert summary["present"] is True
     assert summary["path"] == "/nix/store/system/boot.json"
     assert "top_level_keys" not in summary
-    assert summary["v1"]["kernel"] == "/nix/store/kernel"
+    assert summary["v1"]["kernel"] == "/nix/store/kernel/bzImage"
+    assert summary["v1"]["initrd"] == "/nix/store/initrd/initrd"
     assert "label" not in summary["v1"]
     assert "kernelParams" not in summary["v1"]
     assert "foreign.extension" not in summary
@@ -671,6 +672,42 @@ def test_bootspec_summary_rejects_unverified_whitelisted_values() -> None:
     assert "init" not in summary["v1"]
     assert "kernel" not in summary["v1"]
     assert summary["v1"]["initrd"] == "/nix/store/initrd"
+    assert summary["v1"]["toplevel"] == "/nix/store/system"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "/nix/store/kernel/../secret",
+        "/nix/store/kernel-other/bzImage",
+        "/nix/store/kernel/",
+        "/nix/store/kernel//bzImage",
+    ],
+)
+def test_bootspec_summary_rejects_non_member_kernel_paths(candidate: str) -> None:
+    raw = json.dumps(
+        {
+            "org.nixos.bootspec.v1": {
+                "kernel": candidate,
+                "initrd": "/nix/store/initrd/initrd",
+                "toplevel": "/nix/store/system",
+            }
+        }
+    )
+
+    summary = evidence._bootspec_summary(
+        raw,
+        "/nix/store/system/boot.json",
+        verified_v1_paths={
+            "kernel": "/nix/store/kernel",
+            "initrd": "/nix/store/initrd",
+            "toplevel": "/nix/store/system",
+        },
+        size_bytes=len(raw),
+    )
+
+    assert "kernel" not in summary["v1"]
+    assert summary["v1"]["initrd"] == "/nix/store/initrd/initrd"
     assert summary["v1"]["toplevel"] == "/nix/store/system"
 
 

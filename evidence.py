@@ -658,6 +658,23 @@ def _require_structured_store_path(value: str | None, field: str) -> str:
     return value
 
 
+def _verified_output_member_path(value: str, output_path: str) -> bool:
+    if _STRUCTURED_STORE_PATH_RE.fullmatch(output_path) is None:
+        return False
+    if value == output_path:
+        return True
+    prefix = output_path + "/"
+    if not value.startswith(prefix):
+        return False
+    relative = value[len(prefix) :]
+    parts = relative.split("/")
+    return bool(parts) and all(
+        part not in {"", ".", ".."}
+        and not any(ord(char) <= 0x20 or ord(char) == 0x7F for char in part)
+        for part in parts
+    )
+
+
 def _parse_path_info(raw: str) -> tuple[int | None, Any]:
     value = json.loads(raw)
     records: list[dict[str, Any]] = []
@@ -710,7 +727,11 @@ def _bootspec_summary(
         for key in _SAFE_BOOTSPEC_V1_PATH_FIELDS:
             expected = verified.get(key)
             item = v1.get(key)
-            if expected is None or not isinstance(item, str) or item != expected:
+            if (
+                expected is None
+                or not isinstance(item, str)
+                or not _verified_output_member_path(item, expected)
+            ):
                 continue
             safe_v1[key] = item
         result["v1"] = safe_v1
