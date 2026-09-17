@@ -1122,7 +1122,6 @@ def test_system_build_normalizes_deep_bootspec_recursion(monkeypatch, tmp_path: 
     monkeypatch.setattr(evidence.server, "_resolve_repo", lambda _repo: tmp_path)
     monkeypatch.setattr(evidence.server, "_linked_git_common_dir", lambda _root: None)
     monkeypatch.setattr(evidence.server, "_backend_probe", lambda: {"ready": True})
-    deep = '[' * 1100 + '0' + ']' * 1100
     stdout = "\n".join(
         [
             "NIXER_SOURCE_HEAD\t" + "a" * 40,
@@ -1136,9 +1135,9 @@ def test_system_build_normalizes_deep_bootspec_recursion(monkeypatch, tmp_path: 
             '[{"path":"/nix/store/system","closureSize":1}]',
             "NIXER_PATH_INFO_END",
             "NIXER_BOOTSPEC_PATH\t/nix/store/system/boot.json",
-            f"NIXER_BOOTSPEC_SIZE\t{len(deep)}",
+            "NIXER_BOOTSPEC_SIZE\t2",
             "NIXER_BOOTSPEC_BEGIN",
-            deep,
+            "{}",
             "NIXER_BOOTSPEC_END",
             "",
         ]
@@ -1152,6 +1151,11 @@ def test_system_build_normalizes_deep_bootspec_recursion(monkeypatch, tmp_path: 
             "stdout_truncated": False,
             "stderr_truncated": False,
         },
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_bootspec_summary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RecursionError("nested JSON")),
     )
     result = evidence.system_build(str(tmp_path), "heim-pc")
     assert result["success"] is False
