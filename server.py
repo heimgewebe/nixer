@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import functools
 import json
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,8 @@ PINNED_NIX_IMAGE_TAG = "nixos/nix:2.35.2"
 PINNED_NIX_IMAGE_REF = "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c"
 MAX_OUTPUT_BYTES = 192_000
 MAX_STDERR_BYTES = 64_000
+MAX_CONCURRENT_MCP_TOOLS = 4
+_MCP_TOOL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_MCP_TOOLS)
 
 READ_ANNOTATIONS = ToolAnnotations(
     title="Nix-only specialist evaluation",
@@ -366,7 +371,6 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
     return payload
 
 
-@mcp.tool(name="nixer_status", annotations=READ_ANNOTATIONS)
 def nixer_status() -> dict[str, Any]:
     """Return Nixer's enforced scope and current pinned Nix backend readiness."""
     return {
@@ -407,7 +411,6 @@ def nixer_status() -> dict[str, Any]:
     }
 
 
-@mcp.tool(name="flake_metadata", annotations=READ_ANNOTATIONS)
 def flake_metadata(repo: str) -> dict[str, Any]:
     """Read real metadata for a repository flake without writing its lock file."""
     return _docker_nix(
@@ -418,7 +421,6 @@ def flake_metadata(repo: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool(name="flake_show", annotations=READ_ANNOTATIONS)
 def flake_show(repo: str) -> dict[str, Any]:
     """Evaluate and return the output structure of a repository flake."""
     return _docker_nix(
@@ -429,7 +431,6 @@ def flake_show(repo: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool(name="flake_check", annotations=READ_ANNOTATIONS)
 def flake_check(repo: str) -> dict[str, Any]:
     """Evaluate `nix flake check --no-build`; outputs are never realized."""
     return _docker_nix(
@@ -446,7 +447,6 @@ def flake_check(repo: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool(name="eval_attr", annotations=READ_ANNOTATIONS)
 def eval_attr(repo: str, attribute: str) -> dict[str, Any]:
     """Evaluate one validated flake attribute as JSON."""
     attr = _validate_attr_path(attribute, field="attribute")
@@ -461,7 +461,6 @@ def eval_attr(repo: str, attribute: str) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(name="nixos_option", annotations=READ_ANNOTATIONS)
 def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
     """Evaluate one resulting NixOS config option for a named flake nixosConfiguration."""
     host_attr = _validate_attr_path(host, field="host")
@@ -482,7 +481,6 @@ def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(name="derivation_show", annotations=READ_ANNOTATIONS)
 def derivation_show(repo: str, attribute: str) -> dict[str, Any]:
     """Evaluate and display the derivation for one validated flake installable."""
     attr = _validate_attr_path(attribute, field="attribute")
@@ -497,7 +495,6 @@ def derivation_show(repo: str, attribute: str) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(name="build_dry_run", annotations=READ_ANNOTATIONS)
 def build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
     """Ask Nix what a build would realize, without building or linking the output."""
     attr = _validate_attr_path(attribute, field="attribute")
@@ -509,6 +506,71 @@ def build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
     )
     result["attribute"] = attr
     return result
+
+
+def _run_mcp_tool_sync(function, *args):
+    with _MCP_TOOL_SLOTS:
+        return function(*args)
+
+
+async def _run_mcp_tool(function, *args):
+    return await asyncio.to_thread(_run_mcp_tool_sync, function, *args)
+
+
+@mcp.tool(name="nixer_status", annotations=READ_ANNOTATIONS)
+@functools.wraps(nixer_status)
+async def _mcp_nixer_status() -> dict[str, Any]:
+    """Return Nixer's enforced scope and current pinned Nix backend readiness."""
+    return await _run_mcp_tool(nixer_status)
+
+
+@mcp.tool(name="flake_metadata", annotations=READ_ANNOTATIONS)
+@functools.wraps(flake_metadata)
+async def _mcp_flake_metadata(repo: str) -> dict[str, Any]:
+    """Read real metadata for a repository flake without writing its lock file."""
+    return await _run_mcp_tool(flake_metadata, repo)
+
+
+@mcp.tool(name="flake_show", annotations=READ_ANNOTATIONS)
+@functools.wraps(flake_show)
+async def _mcp_flake_show(repo: str) -> dict[str, Any]:
+    """Evaluate and return the output structure of a repository flake."""
+    return await _run_mcp_tool(flake_show, repo)
+
+
+@mcp.tool(name="flake_check", annotations=READ_ANNOTATIONS)
+@functools.wraps(flake_check)
+async def _mcp_flake_check(repo: str) -> dict[str, Any]:
+    """Evaluate `nix flake check --no-build`; outputs are never realized."""
+    return await _run_mcp_tool(flake_check, repo)
+
+
+@mcp.tool(name="eval_attr", annotations=READ_ANNOTATIONS)
+@functools.wraps(eval_attr)
+async def _mcp_eval_attr(repo: str, attribute: str) -> dict[str, Any]:
+    """Evaluate one validated flake attribute as JSON."""
+    return await _run_mcp_tool(eval_attr, repo, attribute)
+
+
+@mcp.tool(name="nixos_option", annotations=READ_ANNOTATIONS)
+@functools.wraps(nixos_option)
+async def _mcp_nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
+    """Evaluate one resulting NixOS config option for a named flake nixosConfiguration."""
+    return await _run_mcp_tool(nixos_option, repo, host, option)
+
+
+@mcp.tool(name="derivation_show", annotations=READ_ANNOTATIONS)
+@functools.wraps(derivation_show)
+async def _mcp_derivation_show(repo: str, attribute: str) -> dict[str, Any]:
+    """Evaluate and display the derivation for one validated flake installable."""
+    return await _run_mcp_tool(derivation_show, repo, attribute)
+
+
+@mcp.tool(name="build_dry_run", annotations=READ_ANNOTATIONS)
+@functools.wraps(build_dry_run)
+async def _mcp_build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
+    """Ask Nix what a build would realize, without building or linking the output."""
+    return await _run_mcp_tool(build_dry_run, repo, attribute)
 
 
 def main() -> None:
