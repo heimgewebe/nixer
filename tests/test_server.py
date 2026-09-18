@@ -1,6 +1,8 @@
 # Nixer v0 authority and Nix-execution boundary tests.
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,56 @@ def test_status_declares_nix_only_boundary(monkeypatch: pytest.MonkeyPatch) -> N
     assert "real_nix_build" in status["forbidden_effects"]
     assert "nixos_switch_or_boot" in status["forbidden_effects"]
     assert "build_dry_run" in status["allowed_operations"]
+
+
+def test_mcp_runner_allows_blocking_calls_to_overlap() -> None:
+    lock = threading.Lock()
+    both_started = threading.Event()
+    release = threading.Event()
+    active = 0
+
+    def blocking(value: int) -> int:
+        nonlocal active
+        with lock:
+            active += 1
+            if active == 2:
+                both_started.set()
+        if not release.wait(timeout=2):
+            raise AssertionError("concurrent MCP workers did not overlap")
+        return value
+
+    async def scenario() -> list[int]:
+        tasks = [
+            asyncio.create_task(server._run_mcp_tool(blocking, 1)),
+            asyncio.create_task(server._run_mcp_tool(blocking, 2)),
+        ]
+        started = await asyncio.to_thread(both_started.wait, 2)
+        if not started:
+            release.set()
+            raise AssertionError("blocking MCP calls remained serialized")
+        release.set()
+        return list(await asyncio.gather(*tasks))
+
+    assert asyncio.run(scenario()) == [1, 2]
+
+
+def test_mcp_runner_has_bounded_parallelism() -> None:
+    assert server.MAX_CONCURRENT_MCP_TOOLS == 4
+    assert isinstance(server._MCP_TOOL_SLOTS, threading.BoundedSemaphore)
+
+
+def test_mcp_wrappers_preserve_public_tool_schema_names() -> None:
+    wrappers = {
+        server._mcp_nixer_status: "nixer_status",
+        server._mcp_flake_metadata: "flake_metadata",
+        server._mcp_flake_show: "flake_show",
+        server._mcp_flake_check: "flake_check",
+        server._mcp_eval_attr: "eval_attr",
+        server._mcp_nixos_option: "nixos_option",
+        server._mcp_derivation_show: "derivation_show",
+        server._mcp_build_dry_run: "build_dry_run",
+    }
+    assert {wrapper.__name__ for wrapper in wrappers} == set(wrappers.values())
 
 
 def test_repo_path_escape_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
