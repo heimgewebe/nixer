@@ -34,17 +34,13 @@
               substituteInPlace tests/shared/test_sse.py tests/shared/test_ws.py \
                 --replace-fail '127.0.0.1' '127.0.0.2' \
                 --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
-              # MCP 1.30.0 also enables xdist in pyproject.toml. A later
-              # config-sourced --numprocesses auto overrides the CLI -n 0,
-              # so patch the source configuration itself to make serial
-              # execution effective rather than merely requested.
-              substituteInPlace pyproject.toml \
-                --replace-fail '--numprocesses auto' '--numprocesses 0'
             '';
-            # MCP 1.30.0 enables pytest-xdist with an automatic worker count.
-            # Its deprecated WebSocket tests release an ephemeral loopback port
-            # before a child process binds it, so concurrent package checks can
-            # race for that port. Keep the upstream coverage, but run it serially.
+            # pytest-xdist's Nixpkgs setup hook appends
+            # --numprocesses=$NIX_BUILD_CORES after package pytestFlags. Disable
+            # that hook for MCP so the explicit -n 0 below remains authoritative.
+            # Keep the upstream transport coverage; only worker parallelism is
+            # removed to prevent loopback port/session races.
+            dontUsePytestXdist = true;
             pytestFlags = (old.pytestFlags or [ ]) ++ [ "-n" "0" ];
             # The real-build backend deliberately runs without SETUID/SETGID.
             # Consequently Nix builds as container-root; this upstream test
