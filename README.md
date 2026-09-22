@@ -15,11 +15,11 @@ Die öffentliche Fläche bleibt bewusst klein:
 - `flake_show` — reale Outputstruktur eines Flakes;
 - `flake_check` — Evaluation per `nix flake check --no-build`;
 - `eval_attr` — einen streng validierten Flake-Attributpfad evaluieren;
-- `nixos_option` — einen resultierenden NixOS-Optionswert evaluieren;
+- `nixos_option` — einen resultierenden NixOS-Optionswert zusammen mit begrenzten Typ-, Deklarations- und Definitionsort-Metadaten atomar evaluieren;
 - `derivation_show` — resultierende Derivation anzeigen;
 - `build_dry_run` — Buildplan prüfen, ohne den Output zu realisieren.
 
-Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. Beispielsweise lassen sich Optionswert, `definitionsWithLocations` und `declarationPositions` bereits über `nixos_option` und `eval_attr` gemeinsam untersuchen.
+Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. `nixos_option(repo, host, option)` behält seine Eingabesignatur unverändert und liefert Wert, Typ sowie Deklarations- und Definitionsorte aus einer einzigen serverdefinierten Nix-Evaluation desselben Snapshots. Die Werte aus `definitionsWithLocations` werden dabei nicht ausgegeben. Herkunftslisten sind serverseitig klein begrenzt; `declaration_positions_truncated` beziehungsweise `definition_locations_truncated` kennzeichnen, wenn die jeweilige Liste wegen dieser Grenze gekappt wurde.
 
 ## Ausführungsmodell
 

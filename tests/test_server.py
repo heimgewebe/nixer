@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from pathlib import Path
 
@@ -454,21 +455,212 @@ def test_build_tool_is_dry_run_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["operation"] == "build_dry_run"
 
 
-def test_nixos_option_constructs_only_validated_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nixos_option_public_input_schema_remains_unchanged() -> None:
+    assert tuple(inspect.signature(server.nixos_option).parameters) == ("repo", "host", "option")
+    assert tuple(inspect.signature(server._mcp_nixos_option).parameters) == (
+        "repo",
+        "host",
+        "option",
+    )
+
+
+def test_nixos_option_evaluates_value_and_bounded_metadata_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        calls.append(
+            {
+                "repo": repo,
+                "args": args,
+                "operation": operation,
+                "expect_json": expect_json,
+            }
+        )
+        return {
+            "ok": True,
+            "value": {
+                "value": False,
+                "option_metadata": {
+                    "type_name": "bool",
+                    "declaration_positions": [
+                        {"file": "/nix/store/source/sshd.nix", "line": 243, "column": 7}
+                    ],
+                    "declaration_positions_truncated": False,
+                    "definition_locations": ["/nix/store/source/sshd.nix"],
+                    "definition_locations_truncated": False,
+                },
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_option("heim-pc", "heim-pc", "services.openssh.enable")
+
+    assert len(calls) == 1
+    args = calls[0]["args"]
+    assert args[:4] == [
+        "eval",
+        "--json",
+        "--no-write-lock-file",
+        f"{server.FLAKE_SOURCE}#nixosConfigurations",
+    ]
+    assert args[4] == "--apply"
+    expression = args[5]
+    assert "builtins.getAttr \"heim-pc\" configurations" in expression
+    assert "builtins.foldl'" in expression
+    assert '[ "services" "openssh" "enable" ]' in expression
+    assert f"metadataLimit = {server.MAX_NIXOS_OPTION_METADATA_ENTRIES};" in expression
+    assert f"maxLocationChars = {server.MAX_NIXOS_OPTION_LOCATION_CHARS};" in expression
+    assert f"maxTypeNameChars = {server.MAX_NIXOS_OPTION_TYPE_NAME_CHARS};" in expression
+    assert "builtins.genList" in expression
+    assert "builtins.elemAt" in expression
+    assert "builtins.sublist" not in expression
+    assert "optionDefinition ? declarationPositions" in expression
+    assert "builtins.isList optionDefinition.declarationPositions" in expression
+    assert "optionDefinition ? definitionsWithLocations" in expression
+    assert "builtins.isList optionDefinition.definitionsWithLocations" in expression
+    assert "optionDefinition ? type" in expression
+    assert "builtins.isString optionDefinition.type.name" in expression
+    assert "if builtins.isAttrs position then" in expression
+    assert "safeLocation position.file" in expression
+    assert "builtins.isInt position.line" in expression
+    assert "builtins.isInt position.column" in expression
+    assert "builtins.filter" in expression
+    assert "definitionsWithLocations" in expression
+    assert "safeLocation definition.file" in expression
+    assert "declaration_positions_truncated" in expression
+    assert "definition_locations_truncated" in expression
+    assert "builtins.length allDeclarationPositions > metadataLimit" in expression
+    assert "builtins.length allDefinitions > metadataLimit" in expression
+    assert "definition.value" not in expression
+    assert calls[0]["operation"] == "nixos_option"
+    assert calls[0]["expect_json"] is True
+    assert result["value"] is False
+    assert result["option_metadata"] == {
+        "type_name": "bool",
+        "declaration_positions": [
+            {"file": "/nix/store/source/sshd.nix", "line": 243, "column": 7}
+        ],
+        "declaration_positions_truncated": False,
+        "definition_locations": ["/nix/store/source/sshd.nix"],
+        "definition_locations_truncated": False,
+    }
+    assert result["attribute"] == "nixosConfigurations.heim-pc.config.services.openssh.enable"
+
+
+def test_nixos_option_caller_path_is_data_not_nix_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_docker_nix(repo, args, *, operation, expect_json=False):
         captured.update(repo=repo, args=args, operation=operation, expect_json=expect_json)
-        return {"ok": True}
+        return {
+            "ok": True,
+            "value": {
+                "value": True,
+                "option_metadata": {
+                    "type_name": None,
+                    "declaration_positions": [],
+                    "declaration_positions_truncated": False,
+                    "definition_locations": [],
+                    "definition_locations_truncated": False,
+                },
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_option("heim-pc", "heim-pc", "services.foo+bar.enable")
+
+    expression = captured["args"][5]
+    assert '"foo+bar"' in expression
+    assert ".foo+bar" not in expression
+    assert "if optionDefinition ? declarationPositions" in expression
+    assert "if optionDefinition ? definitionsWithLocations" in expression
+    assert result["value"] is True
+    assert result["option_metadata"]["type_name"] is None
+    with pytest.raises(ValueError):
+        server.nixos_option("heim-pc", "one.two", "services.openssh.enable")
+
+
+def test_nixos_option_host_is_quoted_data_not_installable_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        captured.update(repo=repo, args=args, operation=operation, expect_json=expect_json)
+        return {
+            "ok": True,
+            "value": {
+                "value": 1,
+                "option_metadata": {
+                    "type_name": "int",
+                    "declaration_positions": [],
+                    "declaration_positions_truncated": False,
+                    "definition_locations": [],
+                    "definition_locations_truncated": False,
+                },
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_option("heim-pc", "host+name", "services.example.value")
+
+    args = captured["args"]
+    assert args[3] == f"{server.FLAKE_SOURCE}#nixosConfigurations"
+    expression = args[5]
+    assert 'builtins.getAttr "host+name" configurations' in expression
+    assert "#nixosConfigurations.host+name" not in " ".join(args)
+    assert result["host"] == "host+name"
+    assert result["value"] == 1
+
+
+def test_nixos_option_tolerates_missing_optional_metadata_conservatively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        return {
+            "ok": True,
+            "value": {
+                "value": 42,
+                "option_metadata": None,
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_option("heim-pc", "heim-pc", "services.example.value")
+
+    assert result["value"] == 42
+    assert "option_metadata" not in result
+
+
+def test_nixos_option_preserves_nix_failure_without_inventing_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        return {
+            "ok": False,
+            "status": "nix_failed",
+            "result": {"returncode": 1, "stderr": "evaluation failed"},
+        }
 
     monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
     result = server.nixos_option("heim-pc", "heim-pc", "services.openssh.enable")
+
+    assert result["ok"] is False
+    assert result["status"] == "nix_failed"
+    assert "option_metadata" not in result
+    assert result["host"] == "heim-pc"
+    assert result["option"] == "services.openssh.enable"
     assert result["attribute"] == "nixosConfigurations.heim-pc.config.services.openssh.enable"
-    assert captured["args"][-1] == (
-        f"{server.FLAKE_SOURCE}#nixosConfigurations.heim-pc.config.services.openssh.enable"
-    )
-    with pytest.raises(ValueError):
-        server.nixos_option("heim-pc", "one.two", "services.openssh.enable")
+
+
+def test_nixos_option_metadata_limits_are_small_and_positive() -> None:
+    assert 0 < server.MAX_NIXOS_OPTION_METADATA_ENTRIES <= 64
+    assert 0 < server.MAX_NIXOS_OPTION_LOCATION_CHARS <= 4096
+    assert 0 < server.MAX_NIXOS_OPTION_TYPE_NAME_CHARS <= 512
 
 
 def test_pinned_image_contract_matches_heim_pc_production_contract() -> None:
