@@ -488,65 +488,107 @@ def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
         boundedCount = if count < limit then count else limit;
       in
         builtins.genList (index: builtins.elemAt values index) boundedCount;
-    optionDefinition = get cfg.options;
+    isOptionDefinition = value:
+      builtins.isAttrs value
+      && value ? _type
+      && value._type == "option";
+    findExactOption = current: remaining:
+      if remaining == [] then
+        if isOptionDefinition current then current else null
+      else if isOptionDefinition current then
+        null
+      else if builtins.isAttrs current
+        && builtins.hasAttr (builtins.head remaining) current
+      then
+        findExactOption
+          (builtins.getAttr (builtins.head remaining) current)
+          (builtins.tail remaining)
+      else
+        null;
+    optionDefinition = findExactOption cfg.options path;
     safeLocation = value:
       if builtins.isString value || builtins.isPath value then
         let rendered = builtins.toString value; in
         if builtins.stringLength rendered <= maxLocationChars then rendered else null
       else
         null;
+    declarationPositionsSourceInvalid =
+      if optionDefinition == null then
+        false
+      else if optionDefinition ? declarationPositions then
+        ! builtins.isList optionDefinition.declarationPositions
+      else
+        false;
     allDeclarationPositions =
-      if optionDefinition ? declarationPositions
+      if optionDefinition != null
+        && optionDefinition ? declarationPositions
         && builtins.isList optionDefinition.declarationPositions
       then
         optionDefinition.declarationPositions
       else
         [];
     rawDeclarationPositions = take metadataLimit allDeclarationPositions;
+    renderedDeclarationPositions =
+      builtins.map
+        (position:
+          if builtins.isAttrs position then
+            let file =
+              if position ? file then safeLocation position.file else null;
+            in
+              if file != null then {{
+                inherit file;
+                line =
+                  if position ? line && builtins.isInt position.line
+                  then position.line
+                  else null;
+                column =
+                  if position ? column && builtins.isInt position.column
+                  then position.column
+                  else null;
+              }} else
+                null
+          else
+            null)
+        rawDeclarationPositions;
     declarationPositions =
-      builtins.filter
-        (position: position != null)
-        (builtins.map
-          (position:
-            if builtins.isAttrs position then
-              let file =
-                if position ? file then safeLocation position.file else null;
-              in
-                if file != null then {{
-                  inherit file;
-                  line =
-                    if position ? line && builtins.isInt position.line
-                    then position.line
-                    else null;
-                  column =
-                    if position ? column && builtins.isInt position.column
-                    then position.column
-                    else null;
-                }} else
-                  null
-            else
-              null)
-          rawDeclarationPositions);
+      builtins.filter (position: position != null) renderedDeclarationPositions;
+    declarationPositionsTruncated =
+      declarationPositionsSourceInvalid
+      || builtins.length allDeclarationPositions > metadataLimit
+      || builtins.length declarationPositions < builtins.length rawDeclarationPositions;
+    definitionsSourceInvalid =
+      if optionDefinition == null then
+        false
+      else if optionDefinition ? definitionsWithLocations then
+        ! builtins.isList optionDefinition.definitionsWithLocations
+      else
+        false;
     allDefinitions =
-      if optionDefinition ? definitionsWithLocations
+      if optionDefinition != null
+        && optionDefinition ? definitionsWithLocations
         && builtins.isList optionDefinition.definitionsWithLocations
       then
         optionDefinition.definitionsWithLocations
       else
         [];
     rawDefinitions = take metadataLimit allDefinitions;
+    renderedDefinitionLocations =
+      builtins.map
+        (definition:
+          if builtins.isAttrs definition && definition ? file then
+            safeLocation definition.file
+          else
+            null)
+        rawDefinitions;
     definitionLocations =
-      builtins.filter
-        (location: location != null)
-        (builtins.map
-          (definition:
-            if builtins.isAttrs definition && definition ? file then
-              safeLocation definition.file
-            else
-              null)
-          rawDefinitions);
+      builtins.filter (location: location != null) renderedDefinitionLocations;
+    definitionLocationsTruncated =
+      definitionsSourceInvalid
+      || builtins.length allDefinitions > metadataLimit
+      || builtins.length definitionLocations < builtins.length rawDefinitions;
     typeName =
-      if optionDefinition ? type
+      if optionDefinition != null
+        && optionDefinition ? type
         && builtins.isAttrs optionDefinition.type
         && optionDefinition.type ? name
         && builtins.isString optionDefinition.type.name
@@ -557,15 +599,16 @@ def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
         null;
   in {{
     value = get cfg.config;
-    option_metadata = {{
-      type_name = typeName;
-      declaration_positions = declarationPositions;
-      declaration_positions_truncated =
-        builtins.length allDeclarationPositions > metadataLimit;
-      definition_locations = definitionLocations;
-      definition_locations_truncated =
-        builtins.length allDefinitions > metadataLimit;
-    }};
+    option_metadata =
+      if optionDefinition == null then
+        null
+      else {{
+        type_name = typeName;
+        declaration_positions = declarationPositions;
+        declaration_positions_truncated = declarationPositionsTruncated;
+        definition_locations = definitionLocations;
+        definition_locations_truncated = definitionLocationsTruncated;
+      }};
   }}"""
     result = _docker_nix(
         repo,

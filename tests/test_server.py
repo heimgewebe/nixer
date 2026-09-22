@@ -516,6 +516,11 @@ def test_nixos_option_evaluates_value_and_bounded_metadata_atomically(
     assert "builtins.genList" in expression
     assert "builtins.elemAt" in expression
     assert "builtins.sublist" not in expression
+    assert "isOptionDefinition = value:" in expression
+    assert 'value._type == "option"' in expression
+    assert "findExactOption = current: remaining:" in expression
+    assert "else if isOptionDefinition current then" in expression
+    assert "optionDefinition = findExactOption cfg.options path;" in expression
     assert "optionDefinition ? declarationPositions" in expression
     assert "builtins.isList optionDefinition.declarationPositions" in expression
     assert "optionDefinition ? definitionsWithLocations" in expression
@@ -531,8 +536,13 @@ def test_nixos_option_evaluates_value_and_bounded_metadata_atomically(
     assert "safeLocation definition.file" in expression
     assert "declaration_positions_truncated" in expression
     assert "definition_locations_truncated" in expression
+    assert "declarationPositionsSourceInvalid" in expression
+    assert "definitionsSourceInvalid" in expression
     assert "builtins.length allDeclarationPositions > metadataLimit" in expression
     assert "builtins.length allDefinitions > metadataLimit" in expression
+    assert "builtins.length declarationPositions < builtins.length rawDeclarationPositions" in expression
+    assert "builtins.length definitionLocations < builtins.length rawDefinitions" in expression
+    assert "if optionDefinition == null then" in expression
     assert "definition.value" not in expression
     assert calls[0]["operation"] == "nixos_option"
     assert calls[0]["expect_json"] is True
@@ -582,6 +592,39 @@ def test_nixos_option_caller_path_is_data_not_nix_program(
     assert result["option_metadata"]["type_name"] is None
     with pytest.raises(ValueError):
         server.nixos_option("heim-pc", "one.two", "services.openssh.enable")
+
+
+def test_nixos_option_nested_config_value_can_omit_metadata_without_losing_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        captured.update(repo=repo, args=args, operation=operation, expect_json=expect_json)
+        return {
+            "ok": True,
+            "value": {
+                "value": True,
+                "option_metadata": None,
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_option(
+        "heim-pc",
+        "heim-pc",
+        "services.openssh.settings.PasswordAuthentication",
+    )
+
+    expression = captured["args"][5]
+    assert "findExactOption cfg.options path" in expression
+    assert "if optionDefinition == null then" in expression
+    assert result["value"] is True
+    assert "option_metadata" not in result
+    assert result["attribute"] == (
+        "nixosConfigurations.heim-pc.config."
+        "services.openssh.settings.PasswordAuthentication"
+    )
 
 
 def test_nixos_option_host_is_quoted_data_not_installable_code(

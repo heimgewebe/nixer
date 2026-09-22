@@ -19,7 +19,7 @@ Die öffentliche Fläche bleibt bewusst klein:
 - `derivation_show` — resultierende Derivation anzeigen;
 - `build_dry_run` — Buildplan prüfen, ohne den Output zu realisieren.
 
-Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. `nixos_option(repo, host, option)` behält seine Eingabesignatur unverändert und liefert Wert, Typ sowie Deklarations- und Definitionsorte aus einer einzigen serverdefinierten Nix-Evaluation desselben Snapshots. Die Werte aus `definitionsWithLocations` werden dabei nicht ausgegeben. Herkunftslisten sind serverseitig klein begrenzt; `declaration_positions_truncated` beziehungsweise `definition_locations_truncated` kennzeichnen, wenn die jeweilige Liste wegen dieser Grenze gekappt wurde.
+Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. `nixos_option(repo, host, option)` behält seine Eingabesignatur unverändert und liefert Wert sowie – für einen exakt auflösbaren NixOS-Optionsdeskriptor – Typ und begrenzte Deklarations-/Definitionsorte aus einer einzigen serverdefinierten Nix-Evaluation desselben Snapshots. Verschachtelte Unterpfade innerhalb eines Optionswerts behalten ihr bisheriges Wertverhalten und liefern keine erfundenen Metadaten. Die Werte aus `definitionsWithLocations` werden niemals ausgegeben. Herkunftslisten sind serverseitig klein und defensiv begrenzt; `declaration_positions_truncated` beziehungsweise `definition_locations_truncated` kennzeichnen auch Einträge, die wegen ungültiger oder zu langer Herkunftsinformation verworfen wurden.
 
 ## Ausführungsmodell
 
