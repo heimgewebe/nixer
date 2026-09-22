@@ -56,6 +56,9 @@ PINNED_NIX_IMAGE_REF = "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc
 MAX_OUTPUT_BYTES = 192_000
 MAX_STDERR_BYTES = 64_000
 MAX_CONCURRENT_MCP_TOOLS = 4
+MAX_NIXOS_OPTION_METADATA_ENTRIES = 16
+MAX_NIXOS_OPTION_LOCATION_CHARS = 2048
+MAX_NIXOS_OPTION_TYPE_NAME_CHARS = 256
 _MCP_TOOL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_MCP_TOOLS)
 
 READ_ANNOTATIONS = ToolAnnotations(
@@ -462,19 +465,170 @@ def eval_attr(repo: str, attribute: str) -> dict[str, Any]:
 
 
 def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
-    """Evaluate one resulting NixOS config option for a named flake nixosConfiguration."""
+    """Evaluate one NixOS option value plus bounded provenance metadata atomically."""
     host_attr = _validate_attr_path(host, field="host")
     if "." in host_attr:
         raise ValueError("host must be a single Nix attribute segment")
     option_attr = _validate_attr_path(option, field="option")
+    host_literal = json.dumps(host_attr)
+    option_path = "[ " + " ".join(json.dumps(segment) for segment in option_attr.split(".")) + " ]"
     attribute = f"nixosConfigurations.{host_attr}.config.{option_attr}"
-    installable = f"{FLAKE_SOURCE}#{attribute}"
+    installable = f"{FLAKE_SOURCE}#nixosConfigurations"
+    apply_expression = f"""configurations:
+  let
+    cfg = builtins.getAttr {host_literal} configurations;
+    path = {option_path};
+    metadataLimit = {MAX_NIXOS_OPTION_METADATA_ENTRIES};
+    maxLocationChars = {MAX_NIXOS_OPTION_LOCATION_CHARS};
+    maxTypeNameChars = {MAX_NIXOS_OPTION_TYPE_NAME_CHARS};
+    get = set: builtins.foldl' (current: name: builtins.getAttr name current) set path;
+    take = limit: values:
+      let
+        count = builtins.length values;
+        boundedCount = if count < limit then count else limit;
+      in
+        builtins.genList (index: builtins.elemAt values index) boundedCount;
+    isOptionDefinition = value:
+      builtins.isAttrs value
+      && value ? _type
+      && value._type == "option";
+    findExactOption = current: remaining:
+      if remaining == [] then
+        if isOptionDefinition current then current else null
+      else if isOptionDefinition current then
+        null
+      else if builtins.isAttrs current
+        && builtins.hasAttr (builtins.head remaining) current
+      then
+        findExactOption
+          (builtins.getAttr (builtins.head remaining) current)
+          (builtins.tail remaining)
+      else
+        null;
+    optionDefinition = findExactOption cfg.options path;
+    safeLocation = value:
+      if builtins.isString value || builtins.isPath value then
+        let rendered = builtins.toString value; in
+        if builtins.stringLength rendered <= maxLocationChars then rendered else null
+      else
+        null;
+    declarationPositionsSourceInvalid =
+      if optionDefinition == null then
+        false
+      else if optionDefinition ? declarationPositions then
+        ! builtins.isList optionDefinition.declarationPositions
+      else
+        false;
+    allDeclarationPositions =
+      if optionDefinition != null
+        && optionDefinition ? declarationPositions
+        && builtins.isList optionDefinition.declarationPositions
+      then
+        optionDefinition.declarationPositions
+      else
+        [];
+    rawDeclarationPositions = take metadataLimit allDeclarationPositions;
+    renderedDeclarationPositions =
+      builtins.map
+        (position:
+          if builtins.isAttrs position then
+            let file =
+              if position ? file then safeLocation position.file else null;
+            in
+              if file != null then {{
+                inherit file;
+                line =
+                  if position ? line && builtins.isInt position.line
+                  then position.line
+                  else null;
+                column =
+                  if position ? column && builtins.isInt position.column
+                  then position.column
+                  else null;
+              }} else
+                null
+          else
+            null)
+        rawDeclarationPositions;
+    declarationPositions =
+      builtins.filter (position: position != null) renderedDeclarationPositions;
+    declarationPositionsTruncated =
+      declarationPositionsSourceInvalid
+      || builtins.length allDeclarationPositions > metadataLimit
+      || builtins.length declarationPositions < builtins.length rawDeclarationPositions;
+    definitionsSourceInvalid =
+      if optionDefinition == null then
+        false
+      else if optionDefinition ? definitionsWithLocations then
+        ! builtins.isList optionDefinition.definitionsWithLocations
+      else
+        false;
+    allDefinitions =
+      if optionDefinition != null
+        && optionDefinition ? definitionsWithLocations
+        && builtins.isList optionDefinition.definitionsWithLocations
+      then
+        optionDefinition.definitionsWithLocations
+      else
+        [];
+    rawDefinitions = take metadataLimit allDefinitions;
+    renderedDefinitionLocations =
+      builtins.map
+        (definition:
+          if builtins.isAttrs definition && definition ? file then
+            safeLocation definition.file
+          else
+            null)
+        rawDefinitions;
+    definitionLocations =
+      builtins.filter (location: location != null) renderedDefinitionLocations;
+    definitionLocationsTruncated =
+      definitionsSourceInvalid
+      || builtins.length allDefinitions > metadataLimit
+      || builtins.length definitionLocations < builtins.length rawDefinitions;
+    typeName =
+      if optionDefinition != null
+        && optionDefinition ? type
+        && builtins.isAttrs optionDefinition.type
+        && optionDefinition.type ? name
+        && builtins.isString optionDefinition.type.name
+        && builtins.stringLength optionDefinition.type.name <= maxTypeNameChars
+      then
+        optionDefinition.type.name
+      else
+        null;
+  in {{
+    value = get cfg.config;
+    option_metadata =
+      if optionDefinition == null then
+        null
+      else {{
+        type_name = typeName;
+        declaration_positions = declarationPositions;
+        declaration_positions_truncated = declarationPositionsTruncated;
+        definition_locations = definitionLocations;
+        definition_locations_truncated = definitionLocationsTruncated;
+      }};
+  }}"""
     result = _docker_nix(
         repo,
-        ["eval", "--json", "--no-write-lock-file", installable],
+        [
+            "eval",
+            "--json",
+            "--no-write-lock-file",
+            installable,
+            "--apply",
+            apply_expression,
+        ],
         operation="nixos_option",
         expect_json=True,
     )
+    evaluation = result.get("value")
+    if result.get("ok") and isinstance(evaluation, dict) and "value" in evaluation:
+        result["value"] = evaluation["value"]
+        metadata = evaluation.get("option_metadata")
+        if isinstance(metadata, dict):
+            result["option_metadata"] = metadata
     result["host"] = host_attr
     result["option"] = option_attr
     result["attribute"] = attribute
