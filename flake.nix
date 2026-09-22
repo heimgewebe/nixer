@@ -37,8 +37,9 @@
               # Upstream sends ten in-memory requests, sleeps for a fixed 200 ms,
               # then drains only immediately available responses. Busy builders
               # can legitimately deliver the tenth response just after that
-              # deadline. Wait for exactly ten responses instead; fail_after
-              # still fails if the server actually drops or stalls a response.
+              # deadline. Close the input after all ten requests so ServerSession
+              # deterministically drains them and closes its output stream; then
+              # collect every response to preserve the exact-cardinality check.
               substituteInPlace tests/issues/test_malformed_input.py \
                 --replace-fail \
 '            # Give time to process
@@ -52,11 +53,14 @@
                     error_responses.append(response_message.message.root)
             except anyio.WouldBlock:
                 pass  # No more messages' \
-'            # Verify we get all expected error responses without a timing race.
+'            # Signal that all requests have been sent. ServerSession drains the
+            # buffered input and then closes the output stream.
+            await read_send_stream.aclose()
+
+            # Collect every response so both missing and duplicate responses fail.
             error_responses: list[Any] = []
             with anyio.fail_after(5):
-                for _ in malformed_requests:
-                    response_message = await write_receive_stream.receive()
+                async for response_message in write_receive_stream:
                     error_responses.append(response_message.message.root)'
             '';
             # pytest-xdist's Nixpkgs setup hook appends
