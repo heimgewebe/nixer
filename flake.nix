@@ -34,6 +34,34 @@
               substituteInPlace tests/shared/test_sse.py tests/shared/test_ws.py \
                 --replace-fail '127.0.0.1' '127.0.0.2' \
                 --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
+              # Upstream sends ten in-memory requests, sleeps for a fixed 200 ms,
+              # then drains only immediately available responses. Busy builders
+              # can legitimately deliver the tenth response just after that
+              # deadline. Close the input after all ten requests so ServerSession
+              # deterministically drains them and closes its output stream; then
+              # collect every response to preserve the exact-cardinality check.
+              substituteInPlace tests/issues/test_malformed_input.py \
+                --replace-fail \
+'            # Give time to process
+            await anyio.sleep(0.2)
+
+            # Verify we get error responses for all requests
+            error_responses: list[Any] = []
+            try:
+                while True:
+                    response_message = write_receive_stream.receive_nowait()
+                    error_responses.append(response_message.message.root)
+            except anyio.WouldBlock:
+                pass  # No more messages' \
+'            # Signal that all requests have been sent. ServerSession drains the
+            # buffered input and then closes the output stream.
+            await read_send_stream.aclose()
+
+            # Collect every response so both missing and duplicate responses fail.
+            error_responses: list[Any] = []
+            with anyio.fail_after(5):
+                async for response_message in write_receive_stream:
+                    error_responses.append(response_message.message.root)'
             '';
             # pytest-xdist's Nixpkgs setup hook appends
             # --numprocesses=$NIX_BUILD_CORES after package pytestFlags. Disable
