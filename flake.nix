@@ -36,9 +36,11 @@
                 --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
               # Upstream sends ten in-memory requests, sleeps for a fixed 200 ms,
               # then drains only immediately available responses. Busy builders
-              # can legitimately deliver responses after that deadline. Await
-              # exactly the number of request-correlated responses under one
-              # bounded timeout; do not depend on scheduler sleeps or stream EOS.
+              # can legitimately deliver responses after that deadline. Append
+              # an in-band barrier request after the original ten. The session
+              # processes this validation path serially and awaits each response
+              # send, so seeing the barrier proves the preceding batch is drained.
+              # This avoids both scheduler sleeps and output-stream EOS.
               substituteInPlace tests/issues/test_malformed_input.py \
                 --replace-fail \
 '            # Give time to process
@@ -52,14 +54,34 @@
                     error_responses.append(response_message.message.root)
             except anyio.WouldBlock:
                 pass  # No more messages' \
-'            # Await exactly one response per sent request. The subsequent ID
-            # assertions detect missing/duplicate responses without relying on
-            # ServerSession output-stream closure.
+'            # Send an in-band barrier after the original batch. The validation
+            # error path is processed serially, so its response is a completion
+            # marker for every preceding malformed request.
+            barrier_request = JSONRPCRequest(
+                jsonrpc="2.0",
+                id="malformed_barrier",
+                method="initialize",
+            )
+            await read_send_stream.send(
+                SessionMessage(message=JSONRPCMessage(barrier_request))
+            )
+
             error_responses: list[Any] = []
             with anyio.fail_after(5):
                 for _ in malformed_requests:
                     response_message = await write_receive_stream.receive()
-                    error_responses.append(response_message.message.root)'
+                    error_responses.append(response_message.message.root)
+                barrier_message = await write_receive_stream.receive()
+
+            barrier_response = barrier_message.message.root
+            assert isinstance(barrier_response, JSONRPCError)
+            assert barrier_response.id == "malformed_barrier"
+            assert barrier_response.error.code == INVALID_PARAMS
+
+            # The barrier proves all preceding inputs were processed. Anything
+            # still buffered now is an extra/duplicate response.
+            with pytest.raises(anyio.WouldBlock):
+                write_receive_stream.receive_nowait()'
             '';
             # pytest-xdist's Nixpkgs setup hook appends
             # --numprocesses=$NIX_BUILD_CORES after package pytestFlags. Disable
