@@ -17,6 +17,10 @@ def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     assert "sha256-RFQUYl/OXClfqlBbsRus7OZhq29AKNV8k121eCC3o+Q=" in source
     assert 'dontUsePytestXdist = true;' in source
     assert 'pytestFlags = (old.pytestFlags or [ ]) ++ [ "-n" "0" ];' in source
+    assert "for _ in malformed_requests:" in source
+    assert "response_message = await write_receive_stream.receive()" in source
+    assert "async for response_message in write_receive_stream:" not in source
+    assert "await read_send_stream.aclose()" not in source
     assert "--replace-fail '--numprocesses auto' '--numprocesses 0'" not in source
     assert '"test_ws_client_exception_handling"' not in source
     assert "cp ${./evidence.py}" in source

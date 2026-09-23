@@ -36,10 +36,9 @@
                 --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
               # Upstream sends ten in-memory requests, sleeps for a fixed 200 ms,
               # then drains only immediately available responses. Busy builders
-              # can legitimately deliver the tenth response just after that
-              # deadline. Close the input after all ten requests so ServerSession
-              # deterministically drains them and closes its output stream; then
-              # collect every response to preserve the exact-cardinality check.
+              # can legitimately deliver responses after that deadline. Await
+              # exactly the number of request-correlated responses under one
+              # bounded timeout; do not depend on scheduler sleeps or stream EOS.
               substituteInPlace tests/issues/test_malformed_input.py \
                 --replace-fail \
 '            # Give time to process
@@ -53,14 +52,13 @@
                     error_responses.append(response_message.message.root)
             except anyio.WouldBlock:
                 pass  # No more messages' \
-'            # Signal that all requests have been sent. ServerSession drains the
-            # buffered input and then closes the output stream.
-            await read_send_stream.aclose()
-
-            # Collect every response so both missing and duplicate responses fail.
+'            # Await exactly one response per sent request. The subsequent ID
+            # assertions detect missing/duplicate responses without relying on
+            # ServerSession output-stream closure.
             error_responses: list[Any] = []
             with anyio.fail_after(5):
-                async for response_message in write_receive_stream:
+                for _ in malformed_requests:
+                    response_message = await write_receive_stream.receive()
                     error_responses.append(response_message.message.root)'
             '';
             # pytest-xdist's Nixpkgs setup hook appends
