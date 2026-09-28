@@ -109,10 +109,13 @@
             mkdir -p "$out/bin" "$out/libexec/nixer"
             cp ${./server.py} "$out/libexec/nixer/server.py"
             cp ${./evidence.py} "$out/libexec/nixer/evidence.py"
+            cp ${./image_pin.py} "$out/libexec/nixer/image_pin.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer" \
               --add-flags "$out/libexec/nixer/server.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer-evidence" \
               --add-flags "$out/libexec/nixer/evidence.py"
+            makeWrapper ${python}/bin/python "$out/bin/nixer-image-pin" \
+              --add-flags "$out/libexec/nixer/image_pin.py"
             runHook postInstall
           '';
 
