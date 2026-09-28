@@ -43,7 +43,7 @@ Gebundenes Nix-Image:
 sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
 ```
 
-Das entspricht `nixos/nix:2.35.2`. Nixer zieht oder aktualisiert das Image nie selbst und scheitert bei fehlender oder abweichender Identität fail-closed.
+Das entspricht `nixos/nix:2.35.2`. Nixer zieht oder aktualisiert das Image nie selbst und scheitert bei fehlender oder abweichender Identität fail-closed. Der separate Operator-/Deployment-Adapter `nixer-image-pin` darf bei explizitem `--pull-missing` ausschließlich den oben gebundenen immutable Digest ziehen, prüft danach die exakte Image-ID und setzt erst anschließend `nixos/nix:2.35.2` als lokalen Retention-Tag. Der Tag ist lokale Retention-Metadaten und niemals Registry- oder Source-Authority.
 
 ## Nix-Paket und NixOS-Modul
 
@@ -66,11 +66,12 @@ Beispiel:
   services.nixer = {
     enable = true;
     port = 18187;
+    provisionPinnedImage = true;
   };
 }
 ```
 
-Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Container-Client; ein Host kann `services.nixer.containerCli` explizit überschreiben. Das gepinnte Nix-Image muss im gewählten Runtime-Store bereits vorhanden sein.
+Das Modul verwendet standardmäßig `${pkgs.podman}/bin/podman` als absoluten Container-Client; ein Host kann `services.nixer.containerCli` explizit überschreiben. Standardmäßig bleibt die bisherige fail-closed Policy bestehen und das gepinnte Nix-Image muss im gewählten Runtime-Store bereits vorhanden sein. Mit `services.nixer.provisionPinnedImage = true` führt systemd vor jedem Nixer-Start den separaten Provisioning-Adapter aus. Dadurch bleibt der MCP-Runtime die Docker-Mutationsautorität entzogen, während fehlende Pins aus dem immutable Digest wiederhergestellt und mit einem lokal verifizierten Retention-Tag gegen normales Dangling-Image-Cleanup geschützt werden.
 
 ## Evidence-Adapter v1
 

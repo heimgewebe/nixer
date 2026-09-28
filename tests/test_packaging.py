@@ -28,7 +28,9 @@ def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     assert "--replace-fail '--numprocesses auto' '--numprocesses 0'" not in source
     assert '"test_ws_client_exception_handling"' not in source
     assert "cp ${./evidence.py}" in source
+    assert "cp ${./image_pin.py}" in source
     assert '"$out/bin/nixer-evidence"' in source
+    assert '"$out/bin/nixer-image-pin"' in source
 
 
 def test_nixos_module_keeps_mcp_loopback_only() -> None:
@@ -37,6 +39,8 @@ def test_nixos_module_keeps_mcp_loopback_only() -> None:
     assert "NIXER_DOCKER_BIN" in source
     assert "NIXER_CONTAINER_PATH" in source
     assert "NIXER_REPO_ROOT" in source
+    assert "provisionPinnedImage" in source
+    assert "nixer-image-pin --pull-missing" in source
     assert "systemd.user.services.nixer" in source
     assert "ConditionUser" in source
     assert "NoNewPrivileges = true" not in source

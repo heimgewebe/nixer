@@ -57,6 +57,17 @@ in
         required for rootless Podman's newuidmap/newgidmap cold-start helpers.
       '';
     };
+
+    provisionPinnedImage = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Provision Nixer's exact immutable OCI image before service start. The
+        provisioner may pull only the digest-pinned image reference, verifies
+        the exact expected image ID, and then installs the local retention tag.
+        The MCP process itself retains no image-pull or image-tag authority.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -89,6 +100,7 @@ in
       };
       serviceConfig = {
         Type = "simple";
+        ExecStartPre = lib.optional cfg.provisionPinnedImage "${cfg.package}/bin/nixer-image-pin --pull-missing";
         ExecStart = "${cfg.package}/bin/nixer --transport streamable-http --host 127.0.0.1 --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 2;
