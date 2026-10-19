@@ -34,6 +34,14 @@
               substituteInPlace tests/shared/test_sse.py tests/shared/test_ws.py \
                 --replace-fail '127.0.0.1' '127.0.0.2' \
                 --replace-fail 'wait_for_server(server_port)' 'wait_for_server(server_port, host="127.0.0.2")'
+              # The non-SDK client fixture has the same bind-after-release
+              # race on the shared system-loopback port. Its isolated address
+              # must be used consistently by the port reservation, child
+              # Uvicorn server, readiness probe and actual HTTP client.
+              # Preserve the real upstream test and its 10-second deadline.
+              substituteInPlace tests/client/test_notification_response.py \
+                --replace-fail '127.0.0.1' '127.0.0.3' \
+                --replace-fail 'wait_for_server(non_sdk_server_port, timeout=10.0)' 'wait_for_server(non_sdk_server_port, timeout=10.0, host="127.0.0.3")'
               # Upstream sends ten in-memory requests, sleeps for a fixed 200 ms,
               # then drains only immediately available responses. Busy builders
               # can legitimately deliver responses after that deadline. Append

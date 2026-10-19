@@ -33,6 +33,32 @@ def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     assert '"$out/bin/nixer-image-pin"' in source
 
 
+def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() -> None:
+    """Keep the real MCP transport test, isolating its ephemeral listener.
+
+    MCP 1.30's non-SDK fixture releases the random 127.0.0.1 port between
+    probing and starting child Uvicorn. Concurrency elsewhere in the system
+    build can take that port. The package patch changes listener, probe and
+    actual client URL together without enlarging the readiness timeout.
+    """
+    source = (ROOT / "flake.nix").read_text(encoding="utf-8")
+    anchor = "substituteInPlace tests/client/test_notification_response.py"
+    assert source.count(anchor) == 1
+    patch = source.split(anchor, 1)[1].split(
+        "# Upstream sends ten in-memory requests", 1
+    )[0]
+    assert "--replace-fail '127.0.0.1' '127.0.0.3'" in patch
+    assert (
+        "'wait_for_server(non_sdk_server_port, timeout=10.0)' "
+        "'wait_for_server(non_sdk_server_port, timeout=10.0, host=\"127.0.0.3\")'"
+    ) in patch
+    assert "non_sdk_server_port, timeout=30.0" not in source
+    assert "test_non_compliant_notification_response" not in source.split(
+        "disabledTests =", 1
+    )[1]
+    assert 'dontUsePytestXdist = true;' in source
+
+
 def test_nixos_module_keeps_mcp_loopback_only() -> None:
     source = (ROOT / "nix" / "module.nix").read_text(encoding="utf-8")
     assert "--host 127.0.0.1" in source
