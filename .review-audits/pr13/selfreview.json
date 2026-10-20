@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "kind": "grabowski_self_review",
+  "review_mode": "critical_diff_review",
+  "verdict": "PASS",
+  "reviewer": "grabowski-self",
+  "repo": "heimgewebe/nixer",
+  "pr": 13,
+  "head_sha": "712ea5b1e8f8cebeebb206e774023a8a4d842b4b",
+  "base_sha": "3f1196f757c4ca4ff287f641f473e486c7d7300e",
+  "diff_sha256": "f327d27262d2ce8f54e06691cfbcbf4f9cdc128617448ae816b1bfafe21770e6",
+  "reviewed_files": [
+    "flake.nix",
+    "tests/test_packaging.py"
+  ],
+  "review_focus": [
+    "correctness",
+    "regression_risk",
+    "tests",
+    "security",
+    "integration"
+  ],
+  "diff_reviewed": true,
+  "all_findings_triaged": true,
+  "review_iterations": [
+    {
+      "n": 1,
+      "summary": "Functional check against upstream python-sdk v1.30.0 tests/client/test_notification_response.py (GitHub blob 7500abee736fa3874fc50fbe9b7da82146088f20): fixture contains three 127.0.0.1 usages (Uvicorn host, ephemeral port bind, client URL), all replaced with 127.0.0.3 by one exact-file substituteInPlace; readiness probe additionally receives host=127.0.0.3 through the earlier extended test helper. No mismatch between server and client address identified.",
+      "material_findings": 0
+    },
+    {
+      "n": 2,
+      "summary": "Regression review: preserves actual upstream test_non_compliant_notification_response and original ten-second readiness timeout; disabledTests still excludes only unrelated root-permission test; xdist remains disabled in MCP package. Nixer GitHub workflow 39311336063 on exact HEAD completed tests, Ruff, Nix evaluation and actual Nixer package check successfully. Direct host pytest tests/test_packaging.py cannot collect because host lacks Python mcp dependency (ModuleNotFoundError), not counted as PASS.",
+      "material_findings": 0
+    },
+    {
+      "n": 3,
+      "summary": "Security and provenance: modified host 127.0.0.3 is IPv4 loopback-only, not 0.0.0.0 or an external interface; only upstream package test file is modified, with --replace-fail anchors. Nixpkgs and MCP fetchPypi dependency identities remain pinned, no NixOS runtime or privileged/cache/trust-root changes, no tests disabled to mask fixture.",
+      "material_findings": 0
+    },
+    {
+      "n": 4,
+      "summary": "Integration review: source diff contains only flake.nix patch plus focused test_packaging regression; git diff --check clean; independent Nixer flake check --no-build succeeded (evaluation only). Downstream heim-pc PR228 remains separate exact Nixer-revision/NAR-pinned release, and production Review/Captain gates remain independent; this source self-review is not R3 or a merge grant.",
+      "material_findings": 0
+    }
+  ],
+  "findings": [],
+  "material_findings_after_first_review": 0,
+  "material_findings_remaining": 0,
+  "stop_reason": "clean_pass",
+  "uncertainty": 0.16,
+  "residual_risk": {
+    "accepted": true,
+    "reason": "A dedicated loopback alias reduces competition with builders using 127.0.0.1 but cannot prove that 127.0.0.3 will never collide. Real exact-HEAD package CI succeeds; no change to test deadline or protocol assertions. Host pytest is dependency-incomplete and not counted as evidence."
+  }
+}

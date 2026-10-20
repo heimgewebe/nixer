@@ -1,0 +1,36 @@
+{
+  "all_findings_triaged": false,
+  "base_sha": "3f1196f757c4ca4ff287f641f473e486c7d7300e",
+  "diff_reviewed": false,
+  "diff_sha256": "f327d27262d2ce8f54e06691cfbcbf4f9cdc128617448ae816b1bfafe21770e6",
+  "findings": [],
+  "head_sha": "712ea5b1e8f8cebeebb206e774023a8a4d842b4b",
+  "kind": "grabowski_self_review",
+  "material_findings_after_first_review": null,
+  "material_findings_remaining": null,
+  "minimum_review_iterations": 1,
+  "pr": 13,
+  "repo": "heimgewebe/nixer",
+  "residual_risk": {
+    "accepted": false,
+    "reason": ""
+  },
+  "review_focus": [
+    "correctness",
+    "regression_risk",
+    "tests",
+    "security",
+    "integration"
+  ],
+  "review_iterations": [],
+  "review_mode": "critical_diff_review",
+  "reviewed_files": [
+    "flake.nix",
+    "tests/test_packaging.py"
+  ],
+  "reviewer": "grabowski-self",
+  "schema_version": 1,
+  "stop_reason": "clean_pass|diminishing_returns|residual_only_with_reason|small_trivial_change",
+  "uncertainty": null,
+  "verdict": "PASS|NEEDS_CHANGE|BLOCK"
+}
