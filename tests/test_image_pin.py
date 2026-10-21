@@ -491,3 +491,52 @@ def test_timed_out_client_reaps_its_inherited_pipe_descendants(tmp_path):
             pid = int(pidfile.read_text())
             if running(pid):
                 os.kill(pid, signal.SIGKILL)
+
+
+def test_real_missing_docker_inspect_newline_allows_only_exact_absence(tmp_path):
+    """Docker's missing-image template emits a newline even when inspect exits 1."""
+    import sys
+
+    stub = tmp_path / "missing-docker-client"
+    script = (
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stdout.write('\\n')\n"
+        "sys.stderr.write('Error response from daemon: No such image: "
+        + image_pin.PINNED_NIX_IMAGE_TAG + "')\n"
+        "raise SystemExit(1)\n"
+    )
+    stub.write_text(script, encoding="utf-8")
+    stub.chmod(0o700)
+
+    image, probe = image_pin._inspect_id(stub, image_pin.PINNED_NIX_IMAGE_TAG)
+    assert image is None
+    assert (probe["returncode"], probe["stdout"]) == (1, "\n")
+    assert image_pin._proven_retention_tag_absent(probe)
+    # Whitespace-only is compatible with Docker, not arbitrary stdout noise.
+    assert not image_pin._proven_retention_tag_absent({
+        **probe, "stdout": "noise\n",
+    })
+
+
+@pytest.mark.parametrize("client_exit_code", [124, 126])
+def test_legitimate_cli_exit_codes_do_not_kill_process_groups(
+    monkeypatch, client_exit_code
+):
+    """An ordinary client exit 124/126 is not a timeout or pipe failure."""
+    import sys
+
+    kills = []
+
+    def fake_killpg(pid, sig):
+        kills.append((pid, sig))
+
+    monkeypatch.setattr(image_pin.os, "killpg", fake_killpg)
+    result = image_pin._run(
+        Path(sys.executable),
+        ["-c", f"import sys; sys.exit({client_exit_code})"],
+        timeout=5,
+    )
+    assert result["returncode"] == client_exit_code
+    assert result["stderr"] == ""
+    assert kills == [], "ordinary CLI exit must never kill a process group"

@@ -72,6 +72,7 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
 
     deadline = time.monotonic() + timeout
     status = 126
+    abnormal: str | None = None
     try:
         with selectors.DefaultSelector() as selector:
             for name in ("stdout", "stderr"):
@@ -97,14 +98,16 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
                         del tail[:-_MAX_DIAGNOSTIC_CHARS]
         status = process.wait(timeout=max(0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
+        abnormal = "timeout"
         status = 124
     except OSError:
+        abnormal = "io_error"
         status = 126
     finally:
         # Killing only Popen's direct child would leave CLI descendants with
         # inherited pipes alive after the deadline.  Kill the isolated POSIX
         # process group on timeout or abnormal pipe handling instead.
-        if status in {124, 126}:
+        if abnormal is not None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -122,9 +125,9 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
 
     stdout = tails["stdout"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
     stderr = tails["stderr"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
-    if status == 124 and not stderr:
+    if abnormal == "timeout" and not stderr:
         stderr = f"operation exceeded {timeout}s timeout"
-    elif status == 126 and not stderr:
+    elif abnormal == "io_error" and not stderr:
         stderr = "container client output unavailable"
     # Reject noise-prefix attacks even if their trailing bytes look like an ID.
     if args[:2] == ["image", "inspect"] and (truncated["stdout"] or truncated["stderr"]):
@@ -149,7 +152,7 @@ def _proven_retention_tag_absent(probe: dict[str, Any]) -> bool:
     A generic error containing "no such image" is not evidence that this
     tag is absent, and must never authorize local tag mutation.
     """
-    if probe["returncode"] not in {1, 125} or probe["stdout"]:
+    if probe["returncode"] not in {1, 125} or probe["stdout"].strip():
         return False
     tag = re.escape(PINNED_NIX_IMAGE_TAG)
     diagnostic = probe["stderr"].strip()
