@@ -5,6 +5,7 @@ import json
 import os
 import re
 import selectors
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -61,6 +62,8 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # Isolate the client and ordinary descendants from our process group.
+            start_new_session=True,
         )
     except FileNotFoundError:
         return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
@@ -98,6 +101,18 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     except OSError:
         status = 126
     finally:
+        # Killing only Popen's direct child would leave CLI descendants with
+        # inherited pipes alive after the deadline.  Kill the isolated POSIX
+        # process group on timeout or abnormal pipe handling instead.
+        if status in {124, 126}:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                # Preserve direct-child cleanup if group signalling fails.
+                if process.poll() is None:
+                    process.kill()
         if process.poll() is None:
             process.kill()
         process.wait()

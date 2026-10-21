@@ -448,3 +448,46 @@ def test_ambiguous_jit_tag_probe_blocks_tag_mutation(monkeypatch):
     assert (result["ok"], result["status"]) == (False, "retention_tag_probe_failed")
     assert tag_probes == 2
     assert not any(call[0] == "tag" for call in calls)
+
+
+def test_timed_out_client_reaps_its_inherited_pipe_descendants(tmp_path):
+    """Timeout must not leave a grandchild running with inherited client pipes."""
+    import os
+    import signal
+    import sys
+    import time
+
+    if not Path("/proc").is_dir():
+        pytest.skip("Linux /proc required for descendant liveness check")
+
+    pidfile = tmp_path / "client-child.pid"
+    child = "import time; time.sleep(10)"
+    parent = (
+        "import pathlib, subprocess, sys; "
+        f"child = subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=sys.stdout, stderr=sys.stderr); "
+        f"pathlib.Path({str(pidfile)!r}).write_text(str(child.pid))"
+    )
+
+    def running(pid: int) -> bool:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+        except FileNotFoundError:
+            return False
+        return state != "Z"
+
+    try:
+        response = image_pin._run(Path(sys.executable), ["-c", parent], timeout=0.5)
+        assert response["returncode"] == 124
+        assert pidfile.exists()
+        pid = int(pidfile.read_text())
+        for _ in range(30):
+            if not running(pid):
+                break
+            time.sleep(0.02)
+        assert not running(pid), "timed-out client leaked an active descendant"
+    finally:
+        if pidfile.exists():
+            pid = int(pidfile.read_text())
+            if running(pid):
+                os.kill(pid, signal.SIGKILL)
