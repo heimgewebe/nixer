@@ -206,10 +206,37 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
 
     tagged = False
     if tag_id is None:
-        tag = _run(cli, ["tag", PINNED_NIX_IMAGE_ID, PINNED_NIX_IMAGE_TAG], timeout=30)
-        if tag["returncode"] != 0:
-            return {**base, "ok": False, "status": "retention_tag_failed", "probe": tag}
-        tagged = True
+        # A cold immutable pull can take 900s. Before creating any local tag,
+        # re-check that another operator has not installed one in the interim.
+        # Docker/Podman provide no tag compare-and-swap; external tag writers
+        # must still coordinate while this non-atomic operation runs.
+        tag_id, tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+        if tag_id is not None and tag_id != PINNED_NIX_IMAGE_ID:
+            return {
+                **base,
+                "ok": False,
+                "status": "retention_tag_conflict",
+                "actual_tag_image_id": tag_id,
+            }
+        if tag_id is None:
+            diagnostic = tag_probe["stderr"].lower()
+            missing = (
+                tag_probe["returncode"] in {1, 125}
+                and any(marker in diagnostic for marker in (
+                    "no such image", "image not known", "no image found"
+                ))
+            )
+            if not missing:
+                return {
+                    **base,
+                    "ok": False,
+                    "status": "retention_tag_probe_failed",
+                    "probe": tag_probe,
+                }
+            tag = _run(cli, ["tag", PINNED_NIX_IMAGE_ID, PINNED_NIX_IMAGE_TAG], timeout=30)
+            if tag["returncode"] != 0:
+                return {**base, "ok": False, "status": "retention_tag_failed", "probe": tag}
+            tagged = True
 
     final_tag_id, final_tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
     if final_tag_id != PINNED_NIX_IMAGE_ID:

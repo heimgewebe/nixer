@@ -175,7 +175,9 @@ def test_fail_closed_image_provisioning_scenarios(
                 tag_probes += 1
                 if scenario == "tag_conflict":
                     return _probe(stdout="sha256:" + "1" * 64)
-                if tag_probes == 1:
+                # A tag is absent during both the initial and pre-write
+                # JIT probes; only show a new ID after an actual tag write.
+                if not any(call[0] == "tag" for call in calls[:-1]):
                     return _probe(returncode=1, stderr="No such image")
                 if scenario == "tag_changed":
                     return _probe(stdout="sha256:" + "2" * 64)
@@ -348,3 +350,49 @@ def test_real_image_inspect_oversize_and_invalid_utf8_rejected(tmp_path):
     assert detected is None
     assert probe["returncode"] == 0
     assert "\ufffd" in probe["stdout"]
+
+
+def test_tag_created_while_pull_running_fails_before_overwrite(monkeypatch):
+    """A slow immutable pull must not overwrite an intervening operator tag."""
+    image = image_pin.PINNED_NIX_IMAGE_ID
+    local_tag = image_pin.PINNED_NIX_IMAGE_TAG
+    pinned_ref = image_pin.PINNED_NIX_IMAGE_REF
+    conflicting = "sha256:" + "4" * 64
+    calls = []
+    state = {"pulled": False, "other_tag_created": False, "our_tag": False}
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        calls.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            target = args[-1]
+            if target == local_tag:
+                if state["our_tag"]:
+                    return _probe(stdout=image)
+                if state["other_tag_created"]:
+                    return _probe(stdout=conflicting)
+                return _probe(returncode=1, stderr="No such image")
+            if target == image:
+                return _probe(stdout=image) if state["pulled"] else _probe(
+                    returncode=1, stderr="No such image"
+                )
+            if target == pinned_ref:
+                return _probe(stdout=image)
+        if args == ["pull", pinned_ref]:
+            state["pulled"] = True
+            # Simulate an unrelated trusted operator tagging another local ID
+            # during the 900s digest pull. This is not adapter authorization.
+            state["other_tag_created"] = True
+            return _probe()
+        if args == ["tag", image, local_tag]:
+            state["our_tag"] = True
+            return _probe()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert result["ok"] is False
+    assert result["status"] == "retention_tag_conflict"
+    assert not state["our_tag"], "Nixer must not clobber a concurrent operator tag"
+    assert not any(call[0] == "tag" for call in calls)
