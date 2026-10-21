@@ -297,28 +297,32 @@ def test_ambiguous_retention_tag_probe_must_not_mutate(
     assert len(calls) == 1
 
 
-def test_missing_retention_tag_is_recognized_for_both_docker_and_podman(monkeypatch):
-    for returncode, stderr in [
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    [
         (1, "Error: No such image: nixos/nix:2.35.2"),
         (125, "Error: nixos/nix:2.35.2: image not known"),
-    ]:
-        calls = []
+    ],
+)
+def test_missing_retention_tag_is_recognized_for_both_docker_and_podman(
+    monkeypatch, returncode, stderr
+):
+    calls = []
 
-        def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
-            calls.append(args)
-            if len(calls) == 1:
-                assert args[-1] == image_pin.PINNED_NIX_IMAGE_TAG
-                return _probe(returncode=returncode, stderr=stderr)
-            assert args[-1] == image_pin.PINNED_NIX_IMAGE_ID
-            return _probe(returncode=1, stderr="No such image")
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        calls.append(args)
+        if len(calls) == 1:
+            assert args[-1] == image_pin.PINNED_NIX_IMAGE_TAG
+            return _probe(returncode=returncode, stderr=stderr)
+        assert args[-1] == image_pin.PINNED_NIX_IMAGE_ID
+        return _probe(returncode=1, stderr="No such image")
 
-        monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
-        monkeypatch.setattr(Path, "is_file", lambda self: True)
-        monkeypatch.setattr(image_pin, "_run", fake_run)
-        result = image_pin.ensure_pinned_image(pull_missing=False)
-        assert (result["ok"], result["status"]) == (False, "pinned_image_unavailable")
-        assert len(calls) == 2
-
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=False)
+    assert (result["ok"], result["status"]) == (False, "pinned_image_unavailable")
+    assert len(calls) == 2
 
 def test_real_image_inspect_oversize_and_invalid_utf8_rejected(tmp_path):
     import sys
