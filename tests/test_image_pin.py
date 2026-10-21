@@ -28,6 +28,7 @@ def test_existing_image_gets_local_retention_tag_without_pull(monkeypatch) -> No
             return _probe(
                 stdout=(image_pin.PINNED_NIX_IMAGE_ID + "\n") if tagged_before else "",
                 returncode=0 if tagged_before else 1,
+                stderr="" if tagged_before else "No such image",
             )
         if args[:3] == ["image", "inspect", "--format"] and args[-1] in {
             image_pin.PINNED_NIX_IMAGE_ID,
@@ -73,11 +74,11 @@ def test_missing_image_pulls_only_immutable_ref_then_tags_verified_id(monkeypatc
                 return (
                     _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID + "\n")
                     if tag_present
-                    else _probe(returncode=1)
+                    else _probe(returncode=1, stderr="No such image")
                 )
             if ref in {image_pin.PINNED_NIX_IMAGE_ID, image_pin.PINNED_NIX_IMAGE_REF} and image_present:
                 return _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID + "\n")
-            return _probe(returncode=1)
+            return _probe(returncode=1, stderr="No such image")
         raise AssertionError(args)
 
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
@@ -123,12 +124,12 @@ def test_pull_with_wrong_resulting_identity_fails_without_tagging(monkeypatch) -
         nonlocal pulled
         calls.append(args)
         if args[:3] == ["image", "inspect", "--format"] and args[-1] == image_pin.PINNED_NIX_IMAGE_TAG:
-            return _probe(returncode=1)
+            return _probe(returncode=1, stderr="No such image")
         if args[0] == "pull":
             pulled = True
             return _probe()
         if args[:3] == ["image", "inspect", "--format"] and args[-1] == image_pin.PINNED_NIX_IMAGE_ID:
-            return _probe(stdout=wrong + "\n") if pulled else _probe(returncode=1)
+            return _probe(stdout=wrong + "\n") if pulled else _probe(returncode=1, stderr="No such image")
         raise AssertionError(args)
 
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
@@ -175,13 +176,13 @@ def test_fail_closed_image_provisioning_scenarios(
                 if scenario == "tag_conflict":
                     return _probe(stdout="sha256:" + "1" * 64)
                 if tag_probes == 1:
-                    return _probe(returncode=1)
+                    return _probe(returncode=1, stderr="No such image")
                 if scenario == "tag_changed":
                     return _probe(stdout="sha256:" + "2" * 64)
                 return _probe(stdout=image)
             if target == image:
                 if scenario in ("no_pull", "pull_fails"):
-                    return _probe(returncode=1)
+                    return _probe(returncode=1, stderr="No such image")
                 if scenario == "malformed_id":
                     return _probe(stdout="noise " + image)
                 if scenario == "multiple_ids":
@@ -261,3 +262,85 @@ def test_oversized_inspect_stdout_is_fail_closed(monkeypatch):
     )
     assert image_id is None
     assert output["returncode"] == 125
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (0, "malformed", ""),
+        (0, image_pin.PINNED_NIX_IMAGE_ID + "\n" + image_pin.PINNED_NIX_IMAGE_ID, ""),
+        (124, "", "operation exceeded timeout"),
+        (125, "", "container image inspection output exceeded bound"),
+        (126, "", "container client execution failed"),
+        (127, "", "container client unavailable"),
+        (1, "", "temporary daemon error"),
+        (125, "", "other podman error"),
+    ],
+)
+def test_ambiguous_retention_tag_probe_must_not_mutate(
+    monkeypatch, returncode, stdout, stderr
+):
+    calls = []
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        calls.append(args)
+        assert args == [
+            "image", "inspect", "--format", "{{.Id}}", image_pin.PINNED_NIX_IMAGE_TAG
+        ]
+        return _probe(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert (result["ok"], result["status"]) == (False, "retention_tag_probe_failed")
+    assert len(calls) == 1
+
+
+def test_missing_retention_tag_is_recognized_for_both_docker_and_podman(monkeypatch):
+    for returncode, stderr in [
+        (1, "Error: No such image: nixos/nix:2.35.2"),
+        (125, "Error: nixos/nix:2.35.2: image not known"),
+    ]:
+        calls = []
+
+        def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+            calls.append(args)
+            if len(calls) == 1:
+                assert args[-1] == image_pin.PINNED_NIX_IMAGE_TAG
+                return _probe(returncode=returncode, stderr=stderr)
+            assert args[-1] == image_pin.PINNED_NIX_IMAGE_ID
+            return _probe(returncode=1, stderr="No such image")
+
+        monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+        monkeypatch.setattr(Path, "is_file", lambda self: True)
+        monkeypatch.setattr(image_pin, "_run", fake_run)
+        result = image_pin.ensure_pinned_image(pull_missing=False)
+        assert (result["ok"], result["status"]) == (False, "pinned_image_unavailable")
+        assert len(calls) == 2
+
+
+def test_real_image_inspect_oversize_and_invalid_utf8_rejected(tmp_path):
+    import sys
+
+    def stub(name: str, statement: str) -> Path:
+        executable = tmp_path / name
+        executable.write_text(
+            f"#!{sys.executable}\nimport os\n{statement}\n", encoding="utf-8"
+        )
+        executable.chmod(0o700)
+        return executable
+
+    image = image_pin.PINNED_NIX_IMAGE_ID.encode("ascii")
+    # Tail contains an apparently valid ID; the only safe result is rc125.
+    noisy = stub("oversized-client", f"os.write(1, b'n' * 200000 + {image!r})")
+    detected, probe = image_pin._inspect_id(noisy, image_pin.PINNED_NIX_IMAGE_TAG)
+    assert detected is None
+    assert probe["returncode"] == 125
+    assert probe["stdout"] == ""
+
+    invalid = stub("invalid-utf8-client", f"os.write(1, b'\\xff' + {image!r})")
+    detected, probe = image_pin._inspect_id(invalid, image_pin.PINNED_NIX_IMAGE_TAG)
+    assert detected is None
+    assert probe["returncode"] == 0
+    assert "\ufffd" in probe["stdout"]

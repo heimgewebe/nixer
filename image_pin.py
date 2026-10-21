@@ -143,7 +143,25 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
     if not cli.is_file():
         return {**base, "ok": False, "status": "container_client_unavailable"}
 
-    tag_id, _ = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+    tag_id, tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+    if tag_id is None:
+        # A failed inspection is not proof that the tag is absent. In
+        # particular, never overwrite a local tag after malformed ID output,
+        # timeout, oversized stdout, or an inaccessible container client.
+        diagnostic = tag_probe["stderr"].lower()
+        missing = (
+            tag_probe["returncode"] in {1, 125}
+            and any(marker in diagnostic for marker in (
+                "no such image", "image not known", "no image found"
+            ))
+        )
+        if not missing:
+            return {
+                **base,
+                "ok": False,
+                "status": "retention_tag_probe_failed",
+                "probe": tag_probe,
+            }
     if tag_id is not None and tag_id != PINNED_NIX_IMAGE_ID:
         return {
             **base,
