@@ -28,7 +28,7 @@ def test_existing_image_gets_local_retention_tag_without_pull(monkeypatch) -> No
             return _probe(
                 stdout=(image_pin.PINNED_NIX_IMAGE_ID + "\n") if tagged_before else "",
                 returncode=0 if tagged_before else 1,
-                stderr="" if tagged_before else "No such image",
+                stderr="" if tagged_before else f"Error: No such image: {args[-1]}",
             )
         if args[:3] == ["image", "inspect", "--format"] and args[-1] in {
             image_pin.PINNED_NIX_IMAGE_ID,
@@ -74,11 +74,11 @@ def test_missing_image_pulls_only_immutable_ref_then_tags_verified_id(monkeypatc
                 return (
                     _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID + "\n")
                     if tag_present
-                    else _probe(returncode=1, stderr="No such image")
+                    else _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
                 )
             if ref in {image_pin.PINNED_NIX_IMAGE_ID, image_pin.PINNED_NIX_IMAGE_REF} and image_present:
                 return _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID + "\n")
-            return _probe(returncode=1, stderr="No such image")
+            return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
         raise AssertionError(args)
 
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
@@ -124,12 +124,12 @@ def test_pull_with_wrong_resulting_identity_fails_without_tagging(monkeypatch) -
         nonlocal pulled
         calls.append(args)
         if args[:3] == ["image", "inspect", "--format"] and args[-1] == image_pin.PINNED_NIX_IMAGE_TAG:
-            return _probe(returncode=1, stderr="No such image")
+            return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
         if args[0] == "pull":
             pulled = True
             return _probe()
         if args[:3] == ["image", "inspect", "--format"] and args[-1] == image_pin.PINNED_NIX_IMAGE_ID:
-            return _probe(stdout=wrong + "\n") if pulled else _probe(returncode=1, stderr="No such image")
+            return _probe(stdout=wrong + "\n") if pulled else _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
         raise AssertionError(args)
 
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
@@ -178,13 +178,13 @@ def test_fail_closed_image_provisioning_scenarios(
                 # A tag is absent during both the initial and pre-write
                 # JIT probes; only show a new ID after an actual tag write.
                 if not any(call[0] == "tag" for call in calls[:-1]):
-                    return _probe(returncode=1, stderr="No such image")
+                    return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
                 if scenario == "tag_changed":
                     return _probe(stdout="sha256:" + "2" * 64)
                 return _probe(stdout=image)
             if target == image:
                 if scenario in ("no_pull", "pull_fails"):
-                    return _probe(returncode=1, stderr="No such image")
+                    return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
                 if scenario == "malformed_id":
                     return _probe(stdout="noise " + image)
                 if scenario == "multiple_ids":
@@ -277,6 +277,11 @@ def test_oversized_inspect_stdout_is_fail_closed(monkeypatch):
         (127, "", "container client unavailable"),
         (1, "", "temporary daemon error"),
         (125, "", "other podman error"),
+        (125, "", "Error: permission denied; diagnostic says no such image"),
+        (1, "", "Error: No such image: some-other/project:tag"),
+        (125, "", "Error: nixos/nix:2.35.2: image not known; auth failed"),
+        (125, "", "Permission denied\nError: No such image: nixos/nix:2.35.2"),
+        (125, "", "Error: permission denied; no image found in logs"),
     ],
 )
 def test_ambiguous_retention_tag_probe_must_not_mutate(
@@ -317,7 +322,7 @@ def test_missing_retention_tag_is_recognized_for_both_docker_and_podman(
             assert args[-1] == image_pin.PINNED_NIX_IMAGE_TAG
             return _probe(returncode=returncode, stderr=stderr)
         assert args[-1] == image_pin.PINNED_NIX_IMAGE_ID
-        return _probe(returncode=1, stderr="No such image")
+        return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
 
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
     monkeypatch.setattr(Path, "is_file", lambda self: True)
@@ -351,6 +356,20 @@ def test_real_image_inspect_oversize_and_invalid_utf8_rejected(tmp_path):
     assert probe["returncode"] == 0
     assert "\ufffd" in probe["stdout"]
 
+    # A truncated stderr tail must never impersonate a complete missing-tag
+    # diagnostic: the prefix may have contained the real daemon error.
+    trailing = ("Error: No such image: " + image_pin.PINNED_NIX_IMAGE_TAG).encode("ascii")
+    stderr_noisy = stub(
+        "oversized-stderr-client",
+        f"os.write(2, b'n' * 200000 + {trailing!r})",
+    )
+    detected, probe = image_pin._inspect_id(
+        stderr_noisy, image_pin.PINNED_NIX_IMAGE_TAG
+    )
+    assert detected is None
+    assert probe["returncode"] == 125
+    assert not image_pin._proven_retention_tag_absent(probe)
+
 
 def test_tag_created_while_pull_running_fails_before_overwrite(monkeypatch):
     """A slow immutable pull must not overwrite an intervening operator tag."""
@@ -370,10 +389,10 @@ def test_tag_created_while_pull_running_fails_before_overwrite(monkeypatch):
                     return _probe(stdout=image)
                 if state["other_tag_created"]:
                     return _probe(stdout=conflicting)
-                return _probe(returncode=1, stderr="No such image")
+                return _probe(returncode=1, stderr=f"Error: No such image: {args[-1]}")
             if target == image:
                 return _probe(stdout=image) if state["pulled"] else _probe(
-                    returncode=1, stderr="No such image"
+                    returncode=1, stderr=f"Error: No such image: {args[-1]}"
                 )
             if target == pinned_ref:
                 return _probe(stdout=image)
@@ -395,4 +414,37 @@ def test_tag_created_while_pull_running_fails_before_overwrite(monkeypatch):
     assert result["ok"] is False
     assert result["status"] == "retention_tag_conflict"
     assert not state["our_tag"], "Nixer must not clobber a concurrent operator tag"
+    assert not any(call[0] == "tag" for call in calls)
+
+
+def test_ambiguous_jit_tag_probe_blocks_tag_mutation(monkeypatch):
+    """The pre-tag recheck must reject misleading errors, not just the first probe."""
+    image = image_pin.PINNED_NIX_IMAGE_ID
+    tag = image_pin.PINNED_NIX_IMAGE_TAG
+    ref = image_pin.PINNED_NIX_IMAGE_REF
+    tag_probes = 0
+    calls = []
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        nonlocal tag_probes
+        calls.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            if args[-1] == tag:
+                tag_probes += 1
+                if tag_probes == 1:
+                    return _probe(returncode=1, stderr=f"Error: No such image: {tag}")
+                return _probe(
+                    returncode=125,
+                    stderr=f"Error: permission denied; no such image mentioned for {tag}",
+                )
+            if args[-1] in {image, ref}:
+                return _probe(stdout=image)
+        raise AssertionError(f"Unexpected mutation or client call: {args}")
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=False)
+    assert (result["ok"], result["status"]) == (False, "retention_tag_probe_failed")
+    assert tag_probes == 2
     assert not any(call[0] == "tag" for call in calls)

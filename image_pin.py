@@ -112,7 +112,7 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     elif status == 126 and not stderr:
         stderr = "container client output unavailable"
     # Reject noise-prefix attacks even if their trailing bytes look like an ID.
-    if args[:2] == ["image", "inspect"] and truncated["stdout"]:
+    if args[:2] == ["image", "inspect"] and (truncated["stdout"] or truncated["stderr"]):
         return {
             "returncode": 125,
             "stdout": "",
@@ -126,6 +126,26 @@ def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
     if probe["returncode"] != 0:
         return None, probe
     return _canonical_image_id(probe["stdout"]), probe
+
+
+def _proven_retention_tag_absent(probe: dict[str, Any]) -> bool:
+    """Accept only exact, tag-specific missing-image diagnostics.
+
+    A generic error containing "no such image" is not evidence that this
+    tag is absent, and must never authorize local tag mutation.
+    """
+    if probe["returncode"] not in {1, 125} or probe["stdout"]:
+        return False
+    tag = re.escape(PINNED_NIX_IMAGE_TAG)
+    diagnostic = probe["stderr"].strip()
+    missing_patterns = (
+        rf"(?:Error: )?(?:Error response from daemon: )?No such image: {tag}",
+        rf"(?:Error: )?{tag}: image not known",
+    )
+    return any(
+        re.fullmatch(pattern, diagnostic, re.IGNORECASE) is not None
+        for pattern in missing_patterns
+    )
 
 
 def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
@@ -148,14 +168,7 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
         # A failed inspection is not proof that the tag is absent. In
         # particular, never overwrite a local tag after malformed ID output,
         # timeout, oversized stdout, or an inaccessible container client.
-        diagnostic = tag_probe["stderr"].lower()
-        missing = (
-            tag_probe["returncode"] in {1, 125}
-            and any(marker in diagnostic for marker in (
-                "no such image", "image not known", "no image found"
-            ))
-        )
-        if not missing:
+        if not _proven_retention_tag_absent(tag_probe):
             return {
                 **base,
                 "ok": False,
@@ -219,14 +232,7 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
                 "actual_tag_image_id": tag_id,
             }
         if tag_id is None:
-            diagnostic = tag_probe["stderr"].lower()
-            missing = (
-                tag_probe["returncode"] in {1, 125}
-                and any(marker in diagnostic for marker in (
-                    "no such image", "image not known", "no image found"
-                ))
-            )
-            if not missing:
+            if not _proven_retention_tag_absent(tag_probe):
                 return {
                     **base,
                     "ok": False,
