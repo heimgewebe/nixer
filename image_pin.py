@@ -70,10 +70,11 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     except OSError:
         return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
 
-    deadline = time.monotonic() + timeout
     status = 126
     abnormal: str | None = None
     try:
+        # Post-spawn clock exceptions must enter group cleanup.
+        deadline = time.monotonic() + timeout
         with selectors.DefaultSelector() as selector:
             for name in ("stdout", "stderr"):
                 pipe = getattr(process, name)

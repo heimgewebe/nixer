@@ -637,6 +637,74 @@ def test_legitimate_cli_exit_codes_do_not_kill_process_groups(
     assert kills == [], "ordinary CLI exit must never kill a process group"
 
 
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_interrupt_during_post_spawn_deadline_reaps_client_group(
+    monkeypatch, exception_type
+):
+    """An interrupt at the first post-Popen monotonic call must not orphan a group."""
+    import signal
+
+    class FakePipe:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        pid = 434343
+
+        def __init__(self):
+            self.terminated = False
+            self.direct_kills = 0
+            self.waits = 0
+            self.stdout = FakePipe()
+            self.stderr = FakePipe()
+
+        def poll(self):
+            return -signal.SIGKILL if self.terminated else None
+
+        def kill(self):
+            self.direct_kills += 1
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            return -signal.SIGKILL
+
+    proc = FakeProcess()
+    groups = []
+    clock_calls = 0
+    real_monotonic = image_pin.time.monotonic
+
+    def first_clock_call_interrupts():
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 1:
+            raise exception_type()
+        return real_monotonic()
+
+    def spawn(*_args, **kwargs):
+        assert kwargs.get("start_new_session") is True
+        return proc
+
+    def kill_group(pid, sig):
+        groups.append((pid, sig))
+        proc.terminated = True
+
+    monkeypatch.setattr(image_pin.subprocess, "Popen", spawn)
+    monkeypatch.setattr(image_pin.time, "monotonic", first_clock_call_interrupts)
+    monkeypatch.setattr(image_pin.os, "killpg", kill_group)
+    with pytest.raises(exception_type):
+        image_pin._run(Path("/usr/bin/docker"), ["image", "inspect", "test"], timeout=5)
+
+    assert clock_calls >= 1
+    assert groups == [(proc.pid, signal.SIGKILL)]
+    assert proc.direct_kills == 0
+    assert proc.waits == 1
+    assert proc.stdout.closed and proc.stderr.closed
+
+
 def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
     """Ctrl-C must terminate the whole new-session group, not only Popen's child."""
     import signal
