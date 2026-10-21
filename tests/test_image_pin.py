@@ -211,6 +211,101 @@ def test_fail_closed_image_provisioning_scenarios(
     assert not any(call[0] == "pull" for call in calls if scenario != "pull_fails")
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (124, "", "operation exceeded 30s timeout"),
+        (126, "", "container client execution failed"),
+        (127, "", "container client unavailable"),
+        (125, "", "container image inspection output exceeded bound"),
+        (1, "", "temporary daemon error"),
+        (1, "", "Error: No such image: unrelated-image:other"),
+        (1, "", "Error: permission denied; No such image: " + image_pin.PINNED_NIX_IMAGE_ID),
+        (0, "invalid-image-id", ""),
+        (0, image_pin.PINNED_NIX_IMAGE_ID + "\n" + image_pin.PINNED_NIX_IMAGE_ID, ""),
+        (1, image_pin.PINNED_NIX_IMAGE_ID, "Error: No such image: " + image_pin.PINNED_NIX_IMAGE_ID),
+        (124, "", "Error: No such image: " + image_pin.PINNED_NIX_IMAGE_ID),
+    ],
+)
+def test_ambiguous_pinned_id_probe_must_not_pull(
+    monkeypatch, returncode, stdout, stderr
+):
+    """An inconclusive inspect must never authorize even an immutable pull."""
+    calls = []
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        calls.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            if args[-1] == image_pin.PINNED_NIX_IMAGE_TAG:
+                return _probe(
+                    returncode=1,
+                    stderr="Error: No such image: " + image_pin.PINNED_NIX_IMAGE_TAG,
+                )
+            if args[-1] == image_pin.PINNED_NIX_IMAGE_ID:
+                return _probe(returncode=returncode, stdout=stdout, stderr=stderr)
+        # No real container action is ever permitted by this mock.
+        raise AssertionError(f"unexpected client effect: {args}")
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert (result["ok"], result["status"]) == (False, "pinned_image_probe_failed")
+    assert len(calls) == 2
+    assert all(call[0] == "image" for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    [
+        (1, "Error response from daemon: No such image: " + image_pin.PINNED_NIX_IMAGE_ID),
+        (125, "Error: " + image_pin.PINNED_NIX_IMAGE_ID + ": image not known"),
+    ],
+)
+def test_proven_pinned_id_absence_may_pull_exact_digest(
+    monkeypatch, returncode, stderr
+):
+    """Only the exact missing-ID diagnostic permits a digest-pinned pull."""
+    calls = []
+    pulled = False
+    tagged = False
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        nonlocal pulled, tagged
+        calls.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            if args[-1] == image_pin.PINNED_NIX_IMAGE_TAG:
+                return (
+                    _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID)
+                    if tagged else _probe(
+                        returncode=1,
+                        stderr="Error: No such image: " + image_pin.PINNED_NIX_IMAGE_TAG,
+                    )
+                )
+            if args[-1] == image_pin.PINNED_NIX_IMAGE_ID:
+                return (
+                    _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID)
+                    if pulled else _probe(returncode=returncode, stderr=stderr)
+                )
+            if args[-1] == image_pin.PINNED_NIX_IMAGE_REF:
+                return _probe(stdout=image_pin.PINNED_NIX_IMAGE_ID)
+        if args == ["pull", image_pin.PINNED_NIX_IMAGE_REF]:
+            pulled = True
+            return _probe()
+        if args == ["tag", image_pin.PINNED_NIX_IMAGE_ID, image_pin.PINNED_NIX_IMAGE_TAG]:
+            tagged = True
+            return _probe()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert (result["ok"], result["pulled"], result["tagged"]) == (True, True, True)
+    assert calls.count(["pull", image_pin.PINNED_NIX_IMAGE_REF]) == 1
+    assert not any(call == ["pull", image_pin.PINNED_NIX_IMAGE_TAG] for call in calls)
+
+
 def test_invalid_container_client_path_fails_before_probe(monkeypatch):
     monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("docker"))
     result = image_pin.ensure_pinned_image(pull_missing=True)

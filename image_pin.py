@@ -146,24 +146,28 @@ def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
     return _canonical_image_id(probe["stdout"]), probe
 
 
-def _proven_retention_tag_absent(probe: dict[str, Any]) -> bool:
-    """Accept only exact, tag-specific missing-image diagnostics.
+def _proven_image_absent(probe: dict[str, Any], reference: str) -> bool:
+    """A failed inspect permits a pull/tag only for an exact missing reference.
 
-    A generic error containing "no such image" is not evidence that this
-    tag is absent, and must never authorize local tag mutation.
+    Timeouts, malformed IDs and generic daemon failures do not prove absence.
     """
     if probe["returncode"] not in {1, 125} or probe["stdout"].strip():
         return False
-    tag = re.escape(PINNED_NIX_IMAGE_TAG)
+    ref = re.escape(reference)
     diagnostic = probe["stderr"].strip()
     missing_patterns = (
-        rf"(?:Error: )?(?:Error response from daemon: )?No such image: {tag}",
-        rf"(?:Error: )?{tag}: image not known",
+        rf"(?:Error: )?(?:Error response from daemon: )?No such image: {ref}",
+        rf"(?:Error: )?{ref}: image not known",
     )
     return any(
         re.fullmatch(pattern, diagnostic, re.IGNORECASE) is not None
         for pattern in missing_patterns
     )
+
+
+def _proven_retention_tag_absent(probe: dict[str, Any]) -> bool:
+    """Only a proven absence of the exact retention tag authorizes tagging."""
+    return _proven_image_absent(probe, PINNED_NIX_IMAGE_TAG)
 
 
 def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
@@ -182,17 +186,14 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
         return {**base, "ok": False, "status": "container_client_unavailable"}
 
     tag_id, tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
-    if tag_id is None:
-        # A failed inspection is not proof that the tag is absent. In
-        # particular, never overwrite a local tag after malformed ID output,
-        # timeout, oversized stdout, or an inaccessible container client.
-        if not _proven_retention_tag_absent(tag_probe):
-            return {
-                **base,
-                "ok": False,
-                "status": "retention_tag_probe_failed",
-                "probe": tag_probe,
-            }
+    # Failed inspections, timeouts and malformed output do not prove absence.
+    if tag_id is None and not _proven_retention_tag_absent(tag_probe):
+        return {
+            **base,
+            "ok": False,
+            "status": "retention_tag_probe_failed",
+            "probe": tag_probe,
+        }
     if tag_id is not None and tag_id != PINNED_NIX_IMAGE_ID:
         return {
             **base,
@@ -209,6 +210,13 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
                 **base,
                 "ok": False,
                 "status": "pinned_image_unavailable",
+                "probe": image_probe,
+            }
+        if not _proven_image_absent(image_probe, PINNED_NIX_IMAGE_ID):
+            return {
+                **base,
+                "ok": False,
+                "status": "pinned_image_probe_failed",
                 "probe": image_probe,
             }
         pull = _run(cli, ["pull", PINNED_NIX_IMAGE_REF], timeout=900)
