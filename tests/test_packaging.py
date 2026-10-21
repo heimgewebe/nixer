@@ -99,3 +99,13 @@ def test_evidence_adapter_does_not_expand_mcp_surface() -> None:
     source = (ROOT / "server.py").read_text(encoding="utf-8")
     assert '@mcp.tool(name="system_build"' not in source
     assert '@mcp.tool(name="system-build"' not in source
+
+
+def test_optional_pinned_image_pull_has_finite_start_budget() -> None:
+    module = (ROOT / "nix" / "module.nix").read_text(encoding="utf-8")
+    # The 900s immutable pull must not be preempted by systemd's default
+    # 90s startup timeout. Keep it conditional; the option remains off by default.
+    option = module.split("provisionPinnedImage = lib.mkOption", 1)[1].split("};", 1)[0]
+    assert "default = false;" in option
+    assert 'TimeoutStartSec = lib.mkIf cfg.provisionPinnedImage "1200s";' in module
+    assert 'ExecStartPre = lib.optional cfg.provisionPinnedImage' in module

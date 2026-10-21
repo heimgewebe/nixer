@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import image_pin
 import server
 
@@ -138,3 +140,124 @@ def test_pull_with_wrong_resulting_identity_fails_without_tagging(monkeypatch) -
     assert result["ok"] is False
     assert result["status"] == "pinned_image_identity_mismatch"
     assert not any(call[0] == "tag" for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "pull_missing", "expected_status", "may_tag"),
+    [
+        ("no_pull", False, "pinned_image_unavailable", False),
+        ("pull_fails", True, "immutable_pull_failed", False),
+        ("wrong_ref", True, "immutable_ref_identity_mismatch", False),
+        ("tag_fails", True, "retention_tag_failed", True),
+        ("tag_changed", True, "retention_tag_identity_mismatch", True),
+        ("malformed_id", False, "pinned_image_unavailable", False),
+        ("multiple_ids", False, "pinned_image_unavailable", False),
+        ("tag_conflict", True, "retention_tag_conflict", False),
+    ],
+)
+def test_fail_closed_image_provisioning_scenarios(
+    monkeypatch, scenario, pull_missing, expected_status, may_tag
+):
+    """Adversarial responses may not produce success or unauthorized tagging."""
+    calls: list[list[str]] = []
+    tag_probes = 0
+    image = image_pin.PINNED_NIX_IMAGE_ID
+    tag = image_pin.PINNED_NIX_IMAGE_TAG
+    ref = image_pin.PINNED_NIX_IMAGE_REF
+
+    def fake_run(_cli: Path, args: list[str], *, timeout: int = 300):
+        nonlocal tag_probes
+        calls.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            target = args[-1]
+            if target == tag:
+                tag_probes += 1
+                if scenario == "tag_conflict":
+                    return _probe(stdout="sha256:" + "1" * 64)
+                if tag_probes == 1:
+                    return _probe(returncode=1)
+                if scenario == "tag_changed":
+                    return _probe(stdout="sha256:" + "2" * 64)
+                return _probe(stdout=image)
+            if target == image:
+                if scenario in ("no_pull", "pull_fails"):
+                    return _probe(returncode=1)
+                if scenario == "malformed_id":
+                    return _probe(stdout="noise " + image)
+                if scenario == "multiple_ids":
+                    return _probe(stdout=image + "\n" + image)
+                return _probe(stdout=image)
+            if target == ref:
+                return _probe(stdout="sha256:" + "3" * 64 if scenario == "wrong_ref" else image)
+        if args == ["pull", ref]:
+            assert scenario == "pull_fails"
+            return _probe(returncode=1, stderr="offline")
+        if args == ["tag", image, tag]:
+            assert scenario in ("tag_fails", "tag_changed")
+            return _probe(returncode=1 if scenario == "tag_fails" else 0)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/usr/bin/docker"))
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    monkeypatch.setattr(image_pin, "_run", fake_run)
+
+    result = image_pin.ensure_pinned_image(pull_missing=pull_missing)
+    assert result["ok"] is False
+    assert result["status"] == expected_status
+    assert any(call[0] == "tag" for call in calls) is may_tag
+    assert not any(call[0] == "pull" for call in calls if scenario != "pull_fails")
+
+
+def test_invalid_container_client_path_fails_before_probe(monkeypatch):
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("docker"))
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert (result["ok"], result["status"]) == (False, "container_client_path_not_absolute")
+    monkeypatch.setattr(image_pin, "_container_cli", lambda: Path("/nonexistent/nixer-client"))
+    result = image_pin.ensure_pinned_image(pull_missing=True)
+    assert (result["ok"], result["status"]) == (False, "container_client_unavailable")
+
+
+def test_real_subprocess_output_bound_invalid_utf8_timeout_and_oserror(monkeypatch):
+    import subprocess
+    import sys
+
+    cli = Path(sys.executable)
+    large = image_pin._run(cli, ["-c", "import os; os.write(1, b'x' * 200000)"], timeout=5)
+    assert large["returncode"] == 0
+    assert large["stdout"] == "x" * image_pin._MAX_DIAGNOSTIC_CHARS
+    assert len(large["stderr"]) <= image_pin._MAX_DIAGNOSTIC_CHARS
+
+    hostile = image_pin._run(
+        cli, ["-c", "import os; os.write(1, bytes([255])); os.write(2, bytes([254]))"], timeout=5
+    )
+    assert hostile["returncode"] == 0
+    assert "\ufffd" in hostile["stdout"] and "\ufffd" in hostile["stderr"]
+
+    expired = image_pin._run(cli, ["-c", "import time; time.sleep(2)"], timeout=0.05)
+    assert expired["returncode"] == 124
+    assert "timeout" in expired["stderr"]
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError("client path cannot be executed")
+
+    monkeypatch.setattr(subprocess, "Popen", denied)
+    refused = image_pin._run(cli, ["image", "inspect"], timeout=1)
+    assert refused == {
+        "returncode": 126, "stdout": "", "stderr": "container client execution failed"
+    }
+
+
+def test_oversized_inspect_stdout_is_fail_closed(monkeypatch):
+    monkeypatch.setattr(
+        image_pin, "_run",
+        lambda *_args, **_kwargs: {
+            "returncode": 125,
+            "stdout": "",
+            "stderr": "container image inspection output exceeded bound",
+        },
+    )
+    image_id, output = image_pin._inspect_id(
+        Path("/usr/bin/docker"), image_pin.PINNED_NIX_IMAGE_REF
+    )
+    assert image_id is None
+    assert output["returncode"] == 125

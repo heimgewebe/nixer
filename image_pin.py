@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import re
+import selectors
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,31 +46,79 @@ def _container_env() -> dict[str, str]:
 
 
 def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
+    """Drain both client pipes while retaining only bounded diagnostic tails.
+
+    Image inspection must reject oversized stdout instead of accepting an
+    apparently valid ID from the tail of hostile or malformed output.
+    """
+    command = [str(cli), *args]
+    tails: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated = {"stdout": False, "stderr": False}
     try:
-        completed = subprocess.run(
-            [str(cli), *args],
+        process = subprocess.Popen(
+            command,
             env=_container_env(),
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
         return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    except OSError:
+        return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
+
+    deadline = time.monotonic() + timeout
+    status = 126
+    try:
+        with selectors.DefaultSelector() as selector:
+            for name in ("stdout", "stderr"):
+                pipe = getattr(process, name)
+                if pipe is None:
+                    raise OSError("container client pipe missing")
+                selector.register(pipe, selectors.EVENT_READ, name)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    name = key.data
+                    tail = tails[name]
+                    if len(tail) + len(chunk) > _MAX_DIAGNOSTIC_CHARS:
+                        truncated[name] = True
+                    tail.extend(chunk)
+                    if len(tail) > _MAX_DIAGNOSTIC_CHARS:
+                        del tail[:-_MAX_DIAGNOSTIC_CHARS]
+        status = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        status = 124
+    except OSError:
+        status = 126
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+
+    stdout = tails["stdout"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+    stderr = tails["stderr"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+    if status == 124 and not stderr:
+        stderr = f"operation exceeded {timeout}s timeout"
+    elif status == 126 and not stderr:
+        stderr = "container client output unavailable"
+    # Reject noise-prefix attacks even if their trailing bytes look like an ID.
+    if args[:2] == ["image", "inspect"] and truncated["stdout"]:
         return {
-            "returncode": 124,
-            "stdout": stdout[-_MAX_DIAGNOSTIC_CHARS:],
-            "stderr": (stderr or f"operation exceeded {timeout}s timeout")[-_MAX_DIAGNOSTIC_CHARS:],
+            "returncode": 125,
+            "stdout": "",
+            "stderr": "container image inspection output exceeded bound",
         }
-    return {
-        "returncode": completed.returncode,
-        "stdout": completed.stdout[-_MAX_DIAGNOSTIC_CHARS:],
-        "stderr": completed.stderr[-_MAX_DIAGNOSTIC_CHARS:],
-    }
+    return {"returncode": status, "stdout": stdout, "stderr": stderr}
 
 
 def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
