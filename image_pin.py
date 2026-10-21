@@ -103,6 +103,11 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     except OSError:
         abnormal = "io_error"
         status = 126
+    except BaseException:
+        # Ctrl-C / SystemExit must terminate the isolated client group too.
+        # Preserve the original exception after running the shared cleanup.
+        abnormal = "interrupted"
+        raise
     finally:
         # Killing only Popen's direct child would leave CLI descendants with
         # inherited pipes alive after the deadline.  Kill the isolated POSIX

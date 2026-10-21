@@ -635,3 +635,74 @@ def test_legitimate_cli_exit_codes_do_not_kill_process_groups(
     assert result["returncode"] == client_exit_code
     assert result["stderr"] == ""
     assert kills == [], "ordinary CLI exit must never kill a process group"
+
+
+def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
+    """Ctrl-C must terminate the whole new-session group, not only Popen's child."""
+    import signal
+
+    class FakePipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        pid = 424242
+
+        def __init__(self):
+            self.terminated = False
+            self.direct_kills = 0
+            self.waits = 0
+            self.stdout = FakePipe()
+            self.stderr = FakePipe()
+
+        def poll(self):
+            return -signal.SIGKILL if self.terminated else None
+
+        def kill(self):
+            self.direct_kills += 1
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            return -signal.SIGKILL
+
+    class InterruptingSelector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def register(self, *_args):
+            return None
+
+        def get_map(self):
+            return {"stdout": 1, "stderr": 2}
+
+        def select(self, *_args):
+            raise KeyboardInterrupt()
+
+    proc = FakeProcess()
+    groups = []
+
+    def launch(*_args, **kwargs):
+        assert kwargs.get("start_new_session") is True
+        return proc
+
+    def signal_group(pid, sig):
+        groups.append((pid, sig))
+        proc.terminated = True
+
+    monkeypatch.setattr(image_pin.subprocess, "Popen", launch)
+    monkeypatch.setattr(image_pin.selectors, "DefaultSelector", InterruptingSelector)
+    monkeypatch.setattr(image_pin.os, "killpg", signal_group)
+
+    with pytest.raises(KeyboardInterrupt):
+        image_pin._run(Path("/usr/bin/docker"), ["image", "inspect", "test"], timeout=5)
+
+    assert groups == [(proc.pid, signal.SIGKILL)]
+    assert proc.direct_kills == 0
+    assert proc.waits == 1
+    assert proc.stdout.closed and proc.stderr.closed
