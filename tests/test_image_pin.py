@@ -776,11 +776,15 @@ def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
     assert proc.stdout.closed and proc.stderr.closed
 
 @pytest.mark.parametrize(
-    "stop_signals",
-    [(15,), (1,), (15, 1), (2, 15)],
-    ids=["sigterm", "sighup", "sigterm-then-sighup", "sigint-then-sigterm"],
+    "stop_signals,ignore_hup",
+    [((15,), False), ((1,), False), ((15, 1), False), ((2, 15), False),
+     ((1, 15), True)],
+    ids=["sigterm", "sighup", "sigterm-then-sighup", "sigint-then-sigterm",
+         "inherited-sighup-ignored"],
 )
-def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_signals):
+def test_cli_termination_reaps_isolated_client_and_descendant(
+    tmp_path, stop_signals, ignore_hup
+):
     """Real termination of the CLI must not orphan the isolated client group."""
     import os
     import signal
@@ -812,8 +816,18 @@ def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_sig
         except FileNotFoundError:
             return False
 
+    command = [sys.executable, str(Path(image_pin.__file__))]
+    if ignore_hup:
+        # Set SIG_IGN in the parent process, then exec the actual CLI.
+        # exec preserves ignored dispositions, unlike Python signal handlers.
+        prelude = (
+            "import os, signal, sys; "
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+            "os.execv(sys.executable, [sys.executable, sys.argv[1]])"
+        )
+        command = [sys.executable, "-c", prelude, str(Path(image_pin.__file__))]
     process = subprocess.Popen(
-        [sys.executable, str(Path(image_pin.__file__))],
+        command,
         env={**os.environ, "NIXER_DOCKER_BIN": str(client)},
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -833,13 +847,23 @@ def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_sig
             time.sleep(0.02)
         assert len(pids) == 2, "fake container client pidfile incomplete"
         assert all(running(pid) for pid in pids)
-        for stop_signal in stop_signals:
-            process.send_signal(stop_signal)
+        if ignore_hup:
+            process.send_signal(signal.SIGHUP)
+            time.sleep(0.25)
+            assert process.poll() is None, "inherited SIG_IGN unexpectedly terminated CLI"
+            assert all(running(pid) for pid in pids)
+            process.send_signal(signal.SIGTERM)
+        else:
+            for stop_signal in stop_signals:
+                process.send_signal(stop_signal)
         process.wait(timeout=5)
         deadline = time.monotonic() + 2
         while any(running(pid) for pid in pids) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert process.returncode in {128 + sig for sig in stop_signals}
+        if ignore_hup:
+            assert process.returncode == 128 + signal.SIGTERM
+        else:
+            assert process.returncode in {128 + sig for sig in stop_signals}
         assert not any(running(pid) for pid in pids), "termination orphaned client group"
     finally:
         if process.poll() is None:

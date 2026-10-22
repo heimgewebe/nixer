@@ -57,7 +57,10 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     truncated = {"stdout": False, "stderr": False}
     # Keep termination signals masked until the isolated group is reaped.
     # Poll pending signals during potentially long client calls instead.
-    guarded_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    guarded_signals = {
+        sig for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    }
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
     try:
         try:
@@ -357,8 +360,10 @@ def main() -> int:
         raise SystemExit(128 + signum)
 
     try:
-        for sig in previous_handlers:
-            signal.signal(sig, terminate)
+        for sig, previous in previous_handlers.items():
+            # Preserve the caller's explicit SIG_IGN (e.g. nohup).
+            if previous is not signal.SIG_IGN:
+                signal.signal(sig, terminate)
         result = ensure_pinned_image(pull_missing=args.pull_missing)
         print(json.dumps(result, sort_keys=True))
         return 0 if result["ok"] else 1
