@@ -572,7 +572,7 @@ def test_timed_out_client_reaps_its_inherited_pipe_descendants(tmp_path):
         return state != "Z"
 
     try:
-        response = image_pin._run(Path(sys.executable), ["-c", parent], timeout=0.5)
+        response = image_pin._run(Path(sys.executable), ["-c", parent], timeout=5.0)
         assert response["returncode"] == 124
         assert pidfile.exists()
         pid = int(pidfile.read_text())
@@ -777,8 +777,8 @@ def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
 
 @pytest.mark.parametrize(
     "stop_signals",
-    [(15,), (1,), (15, 1)],
-    ids=["sigterm", "sighup", "sigterm-then-sighup"],
+    [(15,), (1,), (15, 1), (2, 15)],
+    ids=["sigterm", "sighup", "sigterm-then-sighup", "sigint-then-sigterm"],
 )
 def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_signals):
     """Real termination of the CLI must not orphan the isolated client group."""

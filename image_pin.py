@@ -55,8 +55,8 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     command = [str(cli), *args]
     tails: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     truncated = {"stdout": False, "stderr": False}
-    # Block asynchronous exits while Popen creates a separate session. A signal
-    # must not escape before the guarded cleanup owns the returned process.
+    # Keep termination signals masked until the isolated group is reaped.
+    # Poll pending signals during potentially long client calls instead.
     guarded_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
     try:
@@ -81,10 +81,9 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
             return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
 
         status = 126
-        abnormal: str | None = None
+        # Fail closed for an exception at any point before process.wait succeeds.
+        abnormal: str | None = "interrupted"
         try:
-            # Enter the cleanup guard before unblocking termination signals.
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             # Post-spawn clock exceptions must enter group cleanup.
             deadline = time.monotonic() + timeout
             with selectors.DefaultSelector() as selector:
@@ -94,10 +93,13 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
                         raise OSError("container client pipe missing")
                     selector.register(pipe, selectors.EVENT_READ, name)
                 while selector.get_map():
+                    pending = signal.sigpending() & guarded_signals
+                    if pending:
+                        raise SystemExit(128 + min(pending))
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(command, timeout)
-                    for key, _ in selector.select(remaining):
+                    for key, _ in selector.select(min(remaining, 0.1)):
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
                             selector.unregister(key.fileobj)
@@ -109,7 +111,21 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
                         tail.extend(chunk)
                         if len(tail) > _MAX_DIAGNOSTIC_CHARS:
                             del tail[:-_MAX_DIAGNOSTIC_CHARS]
-            status = process.wait(timeout=max(0, deadline - time.monotonic()))
+            # Even if a client closes its pipes early, wait in cancellable
+            # slices so TERM/HUP/INT never need to interrupt cleanup.
+            while True:
+                pending = signal.sigpending() & guarded_signals
+                if pending:
+                    raise SystemExit(128 + min(pending))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    status = process.wait(timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            abnormal = None
         except subprocess.TimeoutExpired:
             abnormal = "timeout"
             status = 124
@@ -122,8 +138,7 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
             abnormal = "interrupted"
             raise
         finally:
-            # Prevent reentrant termination while killing/reaping the group.
-            signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+            # Signals remain blocked through killpg, wait and pipe closing.
             # Killing only Popen's direct child would leave CLI descendants with
             # inherited pipes alive after the deadline.  Kill the isolated POSIX
             # process group on timeout or abnormal pipe handling instead.
