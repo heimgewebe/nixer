@@ -774,3 +774,71 @@ def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
     assert proc.direct_kills == 0
     assert proc.waits == 1
     assert proc.stdout.closed and proc.stderr.closed
+
+@pytest.mark.parametrize("stop_signal", [15, 1], ids=["sigterm", "sighup"])
+def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_signal):
+    """Real termination of the CLI must not orphan the isolated client group."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    if not Path("/proc").is_dir():
+        pytest.skip("Linux /proc required for descendant liveness check")
+
+    pidfile = tmp_path / "client-group.pids"
+    client = tmp_path / "fake-container-client"
+    client.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "stdout=sys.stdout, stderr=sys.stderr)\n"
+        f"pathlib.Path({str(pidfile)!r}).write_text(f'{{os.getpid()}} {{child.pid}}')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    client.chmod(0o700)
+
+    def running(pid):
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+        except FileNotFoundError:
+            return False
+
+    process = subprocess.Popen(
+        [sys.executable, str(Path(image_pin.__file__))],
+        env={**os.environ, "NIXER_DOCKER_BIN": str(client)},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    pids = []
+    try:
+        deadline = time.monotonic() + 8
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pidfile.exists(), "fake container client failed to start"
+        pids = [int(pid) for pid in pidfile.read_text().split()]
+        assert len(pids) == 2
+        assert all(running(pid) for pid in pids)
+        process.send_signal(stop_signal)
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 2
+        while any(running(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert process.returncode == 128 + stop_signal
+        assert not any(running(pid) for pid in pids), "termination orphaned client group"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        for pid in pids:
+            if running(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()

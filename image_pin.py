@@ -307,9 +307,26 @@ def main() -> int:
         help="pull the exact immutable digest when the expected image ID is absent",
     )
     args = parser.parse_args()
-    result = ensure_pinned_image(pull_missing=args.pull_missing)
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result["ok"] else 1
+    # A standalone invocation has no systemd cgroup to reap an isolated
+    # Docker/Podman process group after the parent receives TERM or HUP.
+    previous_handlers = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)
+    }
+
+    def terminate(signum: int, _frame: Any) -> None:
+        # Convert default termination into an exception so _run's finally
+        # kills/reaps its isolated client group before the CLI exits.
+        raise SystemExit(128 + signum)
+
+    try:
+        for sig in previous_handlers:
+            signal.signal(sig, terminate)
+        result = ensure_pinned_image(pull_missing=args.pull_missing)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["ok"] else 1
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
 
 
 if __name__ == "__main__":
