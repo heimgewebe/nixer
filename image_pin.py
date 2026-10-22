@@ -4,7 +4,10 @@ import argparse
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,31 +47,137 @@ def _container_env() -> dict[str, str]:
 
 
 def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            [str(cli), *args],
-            env=_container_env(),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except FileNotFoundError:
-        return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return {
-            "returncode": 124,
-            "stdout": stdout[-_MAX_DIAGNOSTIC_CHARS:],
-            "stderr": (stderr or f"operation exceeded {timeout}s timeout")[-_MAX_DIAGNOSTIC_CHARS:],
-        }
-    return {
-        "returncode": completed.returncode,
-        "stdout": completed.stdout[-_MAX_DIAGNOSTIC_CHARS:],
-        "stderr": completed.stderr[-_MAX_DIAGNOSTIC_CHARS:],
+    """Drain both client pipes while retaining only bounded diagnostic tails.
+
+    Image inspection must reject oversized stdout instead of accepting an
+    apparently valid ID from the tail of hostile or malformed output.
+    """
+    command = [str(cli), *args]
+    tails: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated = {"stdout": False, "stderr": False}
+    # Keep termination signals masked until the isolated group is reaped.
+    # Poll pending signals during potentially long client calls instead.
+    guarded_signals = {
+        sig for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        if signal.getsignal(sig) is not signal.SIG_IGN
     }
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+    try:
+        try:
+            process = subprocess.Popen(
+                command,
+                env=_container_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                # The provisioner is a single-threaded CLI; the child runs
+                # only pthread_sigmask, not locks or arbitrary Python code.
+                # Needed so the client's TERM/HUP signal mask is never inherited.
+                preexec_fn=lambda: signal.pthread_sigmask(  # noqa: PLW1509
+                    signal.SIG_SETMASK, previous_mask
+                ),
+            )
+        except FileNotFoundError:
+            return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
+        except OSError:
+            return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
+
+        status = 126
+        # Fail closed for an exception at any point before process.wait succeeds.
+        abnormal: str | None = "interrupted"
+        try:
+            # Post-spawn clock exceptions must enter group cleanup.
+            deadline = time.monotonic() + timeout
+            with selectors.DefaultSelector() as selector:
+                for name in ("stdout", "stderr"):
+                    pipe = getattr(process, name)
+                    if pipe is None:
+                        raise OSError("container client pipe missing")
+                    selector.register(pipe, selectors.EVENT_READ, name)
+                while selector.get_map():
+                    pending = signal.sigpending() & guarded_signals
+                    if pending:
+                        raise SystemExit(128 + min(pending))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        name = key.data
+                        tail = tails[name]
+                        if len(tail) + len(chunk) > _MAX_DIAGNOSTIC_CHARS:
+                            truncated[name] = True
+                        tail.extend(chunk)
+                        if len(tail) > _MAX_DIAGNOSTIC_CHARS:
+                            del tail[:-_MAX_DIAGNOSTIC_CHARS]
+            # Even if a client closes its pipes early, wait in cancellable
+            # slices so TERM/HUP/INT never need to interrupt cleanup.
+            while True:
+                pending = signal.sigpending() & guarded_signals
+                if pending:
+                    raise SystemExit(128 + min(pending))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    status = process.wait(timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            abnormal = None
+        except subprocess.TimeoutExpired:
+            abnormal = "timeout"
+            status = 124
+        except OSError:
+            abnormal = "io_error"
+            status = 126
+        except BaseException:
+            # Ctrl-C / SystemExit must terminate the isolated client group too.
+            # Preserve the original exception after running the shared cleanup.
+            abnormal = "interrupted"
+            raise
+        finally:
+            # Signals remain blocked through killpg, wait and pipe closing.
+            # Killing only Popen's direct child would leave CLI descendants with
+            # inherited pipes alive after the deadline.  Kill the isolated POSIX
+            # process group on timeout or abnormal pipe handling instead.
+            if abnormal is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    # Preserve direct-child cleanup if group signalling fails.
+                    if process.poll() is None:
+                        process.kill()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+        stdout = tails["stdout"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+        stderr = tails["stderr"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+        if abnormal == "timeout" and not stderr:
+            stderr = f"operation exceeded {timeout}s timeout"
+        elif abnormal == "io_error" and not stderr:
+            stderr = "container client output unavailable"
+        # Reject noise-prefix attacks even if their trailing bytes look like an ID.
+        if args[:2] == ["image", "inspect"] and (truncated["stdout"] or truncated["stderr"]):
+            return {
+                "returncode": 125,
+                "stdout": "",
+                "stderr": "container image inspection output exceeded bound",
+            }
+        return {"returncode": status, "stdout": stdout, "stderr": stderr}
+
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
@@ -76,6 +185,30 @@ def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
     if probe["returncode"] != 0:
         return None, probe
     return _canonical_image_id(probe["stdout"]), probe
+
+
+def _proven_image_absent(probe: dict[str, Any], reference: str) -> bool:
+    """A failed inspect permits a pull/tag only for an exact missing reference.
+
+    Timeouts, malformed IDs and generic daemon failures do not prove absence.
+    """
+    if probe["returncode"] not in {1, 125} or probe["stdout"].strip():
+        return False
+    ref = re.escape(reference)
+    diagnostic = probe["stderr"].strip()
+    missing_patterns = (
+        rf"(?:Error: )?(?:Error response from daemon: )?No such image: {ref}",
+        rf"(?:Error: )?{ref}: image not known",
+    )
+    return any(
+        re.fullmatch(pattern, diagnostic, re.IGNORECASE) is not None
+        for pattern in missing_patterns
+    )
+
+
+def _proven_retention_tag_absent(probe: dict[str, Any]) -> bool:
+    """Only a proven absence of the exact retention tag authorizes tagging."""
+    return _proven_image_absent(probe, PINNED_NIX_IMAGE_TAG)
 
 
 def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
@@ -93,7 +226,15 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
     if not cli.is_file():
         return {**base, "ok": False, "status": "container_client_unavailable"}
 
-    tag_id, _ = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+    tag_id, tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+    # Failed inspections, timeouts and malformed output do not prove absence.
+    if tag_id is None and not _proven_retention_tag_absent(tag_probe):
+        return {
+            **base,
+            "ok": False,
+            "status": "retention_tag_probe_failed",
+            "probe": tag_probe,
+        }
     if tag_id is not None and tag_id != PINNED_NIX_IMAGE_ID:
         return {
             **base,
@@ -110,6 +251,13 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
                 **base,
                 "ok": False,
                 "status": "pinned_image_unavailable",
+                "probe": image_probe,
+            }
+        if not _proven_image_absent(image_probe, PINNED_NIX_IMAGE_ID):
+            return {
+                **base,
+                "ok": False,
+                "status": "pinned_image_probe_failed",
                 "probe": image_probe,
             }
         pull = _run(cli, ["pull", PINNED_NIX_IMAGE_REF], timeout=900)
@@ -138,10 +286,30 @@ def ensure_pinned_image(*, pull_missing: bool) -> dict[str, Any]:
 
     tagged = False
     if tag_id is None:
-        tag = _run(cli, ["tag", PINNED_NIX_IMAGE_ID, PINNED_NIX_IMAGE_TAG], timeout=30)
-        if tag["returncode"] != 0:
-            return {**base, "ok": False, "status": "retention_tag_failed", "probe": tag}
-        tagged = True
+        # A cold immutable pull can take 900s. Before creating any local tag,
+        # re-check that another operator has not installed one in the interim.
+        # Docker/Podman provide no tag compare-and-swap; external tag writers
+        # must still coordinate while this non-atomic operation runs.
+        tag_id, tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
+        if tag_id is not None and tag_id != PINNED_NIX_IMAGE_ID:
+            return {
+                **base,
+                "ok": False,
+                "status": "retention_tag_conflict",
+                "actual_tag_image_id": tag_id,
+            }
+        if tag_id is None:
+            if not _proven_retention_tag_absent(tag_probe):
+                return {
+                    **base,
+                    "ok": False,
+                    "status": "retention_tag_probe_failed",
+                    "probe": tag_probe,
+                }
+            tag = _run(cli, ["tag", PINNED_NIX_IMAGE_ID, PINNED_NIX_IMAGE_TAG], timeout=30)
+            if tag["returncode"] != 0:
+                return {**base, "ok": False, "status": "retention_tag_failed", "probe": tag}
+            tagged = True
 
     final_tag_id, final_tag_probe = _inspect_id(cli, PINNED_NIX_IMAGE_TAG)
     if final_tag_id != PINNED_NIX_IMAGE_ID:
@@ -174,9 +342,34 @@ def main() -> int:
         help="pull the exact immutable digest when the expected image ID is absent",
     )
     args = parser.parse_args()
-    result = ensure_pinned_image(pull_missing=args.pull_missing)
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result["ok"] else 1
+    # A standalone invocation has no systemd cgroup to reap an isolated
+    # Docker/Podman process group after the parent receives TERM or HUP.
+    previous_handlers = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)
+    }
+
+    def terminate(signum: int, _frame: Any) -> None:
+        # Only the first TERM/HUP may initiate shutdown; repeated signals
+        # cannot interrupt _run's killpg/wait/pipe-close cleanup.
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, previous_handlers)
+        try:
+            for sig in previous_handlers:
+                signal.signal(sig, signal.SIG_IGN)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        raise SystemExit(128 + signum)
+
+    try:
+        for sig, previous in previous_handlers.items():
+            # Preserve the caller's explicit SIG_IGN (e.g. nohup).
+            if previous is not signal.SIG_IGN:
+                signal.signal(sig, terminate)
+        result = ensure_pinned_image(pull_missing=args.pull_missing)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["ok"] else 1
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
 
 
 if __name__ == "__main__":

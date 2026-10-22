@@ -101,6 +101,8 @@ in
       serviceConfig = {
         Type = "simple";
         ExecStartPre = lib.optional cfg.provisionPinnedImage "${cfg.package}/bin/nixer-image-pin --pull-missing";
+        # Includes the 900s digest pull plus bounded identity/tag inspections.
+        TimeoutStartSec = lib.mkIf cfg.provisionPinnedImage "1200s";
         ExecStart = "${cfg.package}/bin/nixer --transport streamable-http --host 127.0.0.1 --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 2;
