@@ -775,8 +775,12 @@ def test_keyboard_interrupt_reaps_isolated_container_client_group(monkeypatch):
     assert proc.waits == 1
     assert proc.stdout.closed and proc.stderr.closed
 
-@pytest.mark.parametrize("stop_signal", [15, 1], ids=["sigterm", "sighup"])
-def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_signal):
+@pytest.mark.parametrize(
+    "stop_signals",
+    [(15,), (1,), (15, 1)],
+    ids=["sigterm", "sighup", "sigterm-then-sighup"],
+)
+def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_signals):
     """Real termination of the CLI must not orphan the isolated client group."""
     import os
     import signal
@@ -791,7 +795,9 @@ def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_sig
     client = tmp_path / "fake-container-client"
     client.write_text(
         f"#!{sys.executable}\n"
-        "import os, pathlib, subprocess, sys, time\n"
+        "import os, pathlib, signal, subprocess, sys, time\n"
+        "assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, set())\n"
+        "assert signal.SIGHUP not in signal.pthread_sigmask(signal.SIG_BLOCK, set())\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
         "stdout=sys.stdout, stderr=sys.stderr)\n"
         f"pathlib.Path({str(pidfile)!r}).write_text(f'{{os.getpid()}} {{child.pid}}')\n"
@@ -816,18 +822,24 @@ def test_cli_termination_reaps_isolated_client_and_descendant(tmp_path, stop_sig
     pids = []
     try:
         deadline = time.monotonic() + 8
-        while not pidfile.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            if pidfile.exists():
+                try:
+                    pids = [int(pid) for pid in pidfile.read_text().split()]
+                except ValueError:
+                    pids = []
+                if len(pids) == 2:
+                    break
             time.sleep(0.02)
-        assert pidfile.exists(), "fake container client failed to start"
-        pids = [int(pid) for pid in pidfile.read_text().split()]
-        assert len(pids) == 2
+        assert len(pids) == 2, "fake container client pidfile incomplete"
         assert all(running(pid) for pid in pids)
-        process.send_signal(stop_signal)
+        for stop_signal in stop_signals:
+            process.send_signal(stop_signal)
         process.wait(timeout=5)
         deadline = time.monotonic() + 2
         while any(running(pid) for pid in pids) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert process.returncode == 128 + stop_signal
+        assert process.returncode in {128 + sig for sig in stop_signals}
         assert not any(running(pid) for pid in pids), "termination orphaned client group"
     finally:
         if process.poll() is None:

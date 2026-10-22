@@ -55,94 +55,111 @@ def _run(cli: Path, args: list[str], *, timeout: int = 300) -> dict[str, Any]:
     command = [str(cli), *args]
     tails: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     truncated = {"stdout": False, "stderr": False}
+    # Block asynchronous exits while Popen creates a separate session. A signal
+    # must not escape before the guarded cleanup owns the returned process.
+    guarded_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
     try:
-        process = subprocess.Popen(
-            command,
-            env=_container_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # Isolate the client and ordinary descendants from our process group.
-            start_new_session=True,
-        )
-    except FileNotFoundError:
-        return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
-    except OSError:
-        return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
+        try:
+            process = subprocess.Popen(
+                command,
+                env=_container_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                # The provisioner is a single-threaded CLI; the child runs
+                # only pthread_sigmask, not locks or arbitrary Python code.
+                # Needed so the client's TERM/HUP signal mask is never inherited.
+                preexec_fn=lambda: signal.pthread_sigmask(  # noqa: PLW1509
+                    signal.SIG_SETMASK, previous_mask
+                ),
+            )
+        except FileNotFoundError:
+            return {"returncode": 127, "stdout": "", "stderr": "container client unavailable"}
+        except OSError:
+            return {"returncode": 126, "stdout": "", "stderr": "container client execution failed"}
 
-    status = 126
-    abnormal: str | None = None
-    try:
-        # Post-spawn clock exceptions must enter group cleanup.
-        deadline = time.monotonic() + timeout
-        with selectors.DefaultSelector() as selector:
-            for name in ("stdout", "stderr"):
-                pipe = getattr(process, name)
-                if pipe is None:
-                    raise OSError("container client pipe missing")
-                selector.register(pipe, selectors.EVENT_READ, name)
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                for key, _ in selector.select(remaining):
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    name = key.data
-                    tail = tails[name]
-                    if len(tail) + len(chunk) > _MAX_DIAGNOSTIC_CHARS:
-                        truncated[name] = True
-                    tail.extend(chunk)
-                    if len(tail) > _MAX_DIAGNOSTIC_CHARS:
-                        del tail[:-_MAX_DIAGNOSTIC_CHARS]
-        status = process.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        abnormal = "timeout"
-        status = 124
-    except OSError:
-        abnormal = "io_error"
         status = 126
-    except BaseException:
-        # Ctrl-C / SystemExit must terminate the isolated client group too.
-        # Preserve the original exception after running the shared cleanup.
-        abnormal = "interrupted"
-        raise
-    finally:
-        # Killing only Popen's direct child would leave CLI descendants with
-        # inherited pipes alive after the deadline.  Kill the isolated POSIX
-        # process group on timeout or abnormal pipe handling instead.
-        if abnormal is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                # Preserve direct-child cleanup if group signalling fails.
-                if process.poll() is None:
-                    process.kill()
-        if process.poll() is None:
-            process.kill()
-        process.wait()
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
+        abnormal: str | None = None
+        try:
+            # Enter the cleanup guard before unblocking termination signals.
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            # Post-spawn clock exceptions must enter group cleanup.
+            deadline = time.monotonic() + timeout
+            with selectors.DefaultSelector() as selector:
+                for name in ("stdout", "stderr"):
+                    pipe = getattr(process, name)
+                    if pipe is None:
+                        raise OSError("container client pipe missing")
+                    selector.register(pipe, selectors.EVENT_READ, name)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        name = key.data
+                        tail = tails[name]
+                        if len(tail) + len(chunk) > _MAX_DIAGNOSTIC_CHARS:
+                            truncated[name] = True
+                        tail.extend(chunk)
+                        if len(tail) > _MAX_DIAGNOSTIC_CHARS:
+                            del tail[:-_MAX_DIAGNOSTIC_CHARS]
+            status = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            abnormal = "timeout"
+            status = 124
+        except OSError:
+            abnormal = "io_error"
+            status = 126
+        except BaseException:
+            # Ctrl-C / SystemExit must terminate the isolated client group too.
+            # Preserve the original exception after running the shared cleanup.
+            abnormal = "interrupted"
+            raise
+        finally:
+            # Prevent reentrant termination while killing/reaping the group.
+            signal.pthread_sigmask(signal.SIG_BLOCK, guarded_signals)
+            # Killing only Popen's direct child would leave CLI descendants with
+            # inherited pipes alive after the deadline.  Kill the isolated POSIX
+            # process group on timeout or abnormal pipe handling instead.
+            if abnormal is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    # Preserve direct-child cleanup if group signalling fails.
+                    if process.poll() is None:
+                        process.kill()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
-    stdout = tails["stdout"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
-    stderr = tails["stderr"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
-    if abnormal == "timeout" and not stderr:
-        stderr = f"operation exceeded {timeout}s timeout"
-    elif abnormal == "io_error" and not stderr:
-        stderr = "container client output unavailable"
-    # Reject noise-prefix attacks even if their trailing bytes look like an ID.
-    if args[:2] == ["image", "inspect"] and (truncated["stdout"] or truncated["stderr"]):
-        return {
-            "returncode": 125,
-            "stdout": "",
-            "stderr": "container image inspection output exceeded bound",
-        }
-    return {"returncode": status, "stdout": stdout, "stderr": stderr}
+        stdout = tails["stdout"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+        stderr = tails["stderr"].decode("utf-8", "replace")[-_MAX_DIAGNOSTIC_CHARS:]
+        if abnormal == "timeout" and not stderr:
+            stderr = f"operation exceeded {timeout}s timeout"
+        elif abnormal == "io_error" and not stderr:
+            stderr = "container client output unavailable"
+        # Reject noise-prefix attacks even if their trailing bytes look like an ID.
+        if args[:2] == ["image", "inspect"] and (truncated["stdout"] or truncated["stderr"]):
+            return {
+                "returncode": 125,
+                "stdout": "",
+                "stderr": "container image inspection output exceeded bound",
+            }
+        return {"returncode": status, "stdout": stdout, "stderr": stderr}
+
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _inspect_id(cli: Path, reference: str) -> tuple[str | None, dict[str, Any]]:
@@ -314,8 +331,14 @@ def main() -> int:
     }
 
     def terminate(signum: int, _frame: Any) -> None:
-        # Convert default termination into an exception so _run's finally
-        # kills/reaps its isolated client group before the CLI exits.
+        # Only the first TERM/HUP may initiate shutdown; repeated signals
+        # cannot interrupt _run's killpg/wait/pipe-close cleanup.
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, previous_handlers)
+        try:
+            for sig in previous_handlers:
+                signal.signal(sig, signal.SIG_IGN)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         raise SystemExit(128 + signum)
 
     try:
