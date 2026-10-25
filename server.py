@@ -57,6 +57,7 @@ MAX_OUTPUT_BYTES = 192_000
 MAX_STDERR_BYTES = 64_000
 MAX_CONCURRENT_MCP_TOOLS = 4
 MAX_NIXOS_OPTION_METADATA_ENTRIES = 16
+MAX_NIXOS_OPTION_BATCH = 8
 MAX_NIXOS_OPTION_LOCATION_CHARS = 2048
 MAX_NIXOS_OPTION_TYPE_NAME_CHARS = 256
 _MCP_TOOL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_MCP_TOOLS)
@@ -389,6 +390,7 @@ def nixer_status() -> dict[str, Any]:
             "flake_check_no_build",
             "eval_attr",
             "nixos_option",
+            "nixos_options",
             "derivation_show",
             "build_dry_run",
         ],
@@ -464,16 +466,9 @@ def eval_attr(repo: str, attribute: str) -> dict[str, Any]:
     return result
 
 
-def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
-    """Evaluate one NixOS option value plus bounded provenance metadata atomically."""
-    host_attr = _validate_attr_path(host, field="host")
-    if "." in host_attr:
-        raise ValueError("host must be a single Nix attribute segment")
-    option_attr = _validate_attr_path(option, field="option")
+def _nixos_option_apply_expression(host_attr: str, option_attr: str) -> str:
     host_literal = json.dumps(host_attr)
     option_path = "[ " + " ".join(json.dumps(segment) for segment in option_attr.split(".")) + " ]"
-    attribute = f"nixosConfigurations.{host_attr}.config.{option_attr}"
-    installable = f"{FLAKE_SOURCE}#nixosConfigurations"
     apply_expression = f"""configurations:
   let
     cfg = builtins.getAttr {host_literal} configurations;
@@ -610,6 +605,18 @@ def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
         definition_locations_truncated = definitionLocationsTruncated;
       }};
   }}"""
+    return apply_expression
+
+
+def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
+    """Evaluate one NixOS option value plus bounded provenance metadata atomically."""
+    host_attr = _validate_attr_path(host, field="host")
+    if "." in host_attr:
+        raise ValueError("host must be a single Nix attribute segment")
+    option_attr = _validate_attr_path(option, field="option")
+    attribute = f"nixosConfigurations.{host_attr}.config.{option_attr}"
+    installable = f"{FLAKE_SOURCE}#nixosConfigurations"
+    apply_expression = _nixos_option_apply_expression(host_attr, option_attr)
     result = _docker_nix(
         repo,
         [
@@ -632,6 +639,59 @@ def nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
     result["host"] = host_attr
     result["option"] = option_attr
     result["attribute"] = attribute
+    return result
+
+
+def nixos_options(repo: str, host: str, options: list[str]) -> dict[str, Any]:
+    """Evaluate up to eight NixOS options together, with bounded provenance metadata."""
+    host_attr = _validate_attr_path(host, field="host")
+    if "." in host_attr:
+        raise ValueError("host must be a single Nix attribute segment")
+    if not isinstance(options, list) or not 1 <= len(options) <= MAX_NIXOS_OPTION_BATCH:
+        raise ValueError("options must be a list of 1 to 8 option paths")
+    option_attrs = [_validate_attr_path(option, field="option") for option in options]
+    if len(set(option_attrs)) != len(option_attrs):
+        raise ValueError("options must not contain duplicates")
+    # One Nix evaluator, one Git-backed snapshot, one pinned container run.
+    # Each expression uses the unchanged nixos_option value/metadata logic.
+    entries = "\n".join(
+        f"    {json.dumps(option)} = ({_nixos_option_apply_expression(host_attr, option)}) configurations;"
+        for option in option_attrs
+    )
+    expression = "configurations: {\n" + entries + "\n}"
+    result = _docker_nix(
+        repo,
+        [
+            "eval", "--json", "--no-write-lock-file",
+            f"{FLAKE_SOURCE}#nixosConfigurations", "--apply", expression,
+        ],
+        operation="nixos_options",
+        expect_json=True,
+    )
+    evaluation = result.get("value")
+    if result.get("ok"):
+        if (
+            not isinstance(evaluation, dict)
+            or set(evaluation) != set(option_attrs)
+            or any(
+                not isinstance(evaluation[option], dict) or "value" not in evaluation[option]
+                for option in option_attrs
+            )
+        ):
+            result["ok"] = False
+            result["status"] = "invalid_json_output"
+            result.pop("value", None)
+        else:
+            result["value"] = {option: evaluation[option]["value"] for option in option_attrs}
+            metadata = {
+                option: evaluation[option]["option_metadata"]
+                for option in option_attrs
+                if isinstance(evaluation[option].get("option_metadata"), dict)
+            }
+            if metadata:
+                result["option_metadata"] = metadata
+    result["host"] = host_attr
+    result["options"] = option_attrs
     return result
 
 
@@ -711,6 +771,13 @@ async def _mcp_eval_attr(repo: str, attribute: str) -> dict[str, Any]:
 async def _mcp_nixos_option(repo: str, host: str, option: str) -> dict[str, Any]:
     """Evaluate one resulting NixOS config option for a named flake nixosConfiguration."""
     return await _run_mcp_tool(nixos_option, repo, host, option)
+
+
+@mcp.tool(name="nixos_options", annotations=READ_ANNOTATIONS)
+@functools.wraps(nixos_options)
+async def _mcp_nixos_options(repo: str, host: str, options: list[str]) -> dict[str, Any]:
+    """Evaluate bounded NixOS option values and provenance in one snapshot."""
+    return await _run_mcp_tool(nixos_options, repo, host, options)
 
 
 @mcp.tool(name="derivation_show", annotations=READ_ANNOTATIONS)

@@ -74,6 +74,7 @@ Nixer bietet weiterhin nur die kleine typisierte MCP-Fläche:
 - `flake check --no-build`;
 - Evaluation eines streng validierten Flake-Attributpfads;
 - Evaluation einer streng validierten NixOS-Option;
+- gemeinsame Evaluation von höchstens acht validierten NixOS-Optionen in einer einzigen kurzlebigen Ausführung ohne eigenen Task-Lifecycle;
 - Anzeige einer Derivation;
 - `nix build --dry-run` für einen streng validierten Installable.
 
