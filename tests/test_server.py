@@ -48,6 +48,7 @@ def test_status_declares_nix_only_boundary(monkeypatch: pytest.MonkeyPatch) -> N
     assert "real_nix_build" in status["forbidden_effects"]
     assert "nixos_switch_or_boot" in status["forbidden_effects"]
     assert "build_dry_run" in status["allowed_operations"]
+    assert "nixos_options" in status["allowed_operations"]
 
 
 def test_mcp_runner_allows_blocking_calls_to_overlap() -> None:
@@ -94,6 +95,7 @@ def test_mcp_wrappers_preserve_public_tool_schema_names() -> None:
         server._mcp_flake_check: "flake_check",
         server._mcp_eval_attr: "eval_attr",
         server._mcp_nixos_option: "nixos_option",
+        server._mcp_nixos_options: "nixos_options",
         server._mcp_derivation_show: "derivation_show",
         server._mcp_build_dry_run: "build_dry_run",
     }
@@ -698,6 +700,101 @@ def test_nixos_option_preserves_nix_failure_without_inventing_metadata(
     assert result["host"] == "heim-pc"
     assert result["option"] == "services.openssh.enable"
     assert result["attribute"] == "nixosConfigurations.heim-pc.config.services.openssh.enable"
+
+
+def test_nixos_options_reuses_one_backend_and_existing_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_docker_nix(repo, args, *, operation, expect_json=False):
+        calls.append({"repo": repo, "args": args, "operation": operation, "expect_json": expect_json})
+        return {
+            "ok": True,
+            "value": {
+                "services.openssh.enable": {
+                    "value": False,
+                    "option_metadata": {
+                        "type_name": "bool",
+                        "declaration_positions": [],
+                        "declaration_positions_truncated": False,
+                        "definition_locations": ["/nix/store/nixos/sshd.nix"],
+                        "definition_locations_truncated": False,
+                    },
+                },
+                "networking.hostName": {"value": "heim-pc", "option_metadata": None},
+            },
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_docker_nix)
+    result = server.nixos_options("heim-pc", "heim-pc", [
+        "services.openssh.enable", "networking.hostName"
+    ])
+    assert len(calls) == 1
+    assert calls[0]["repo"] == "heim-pc"
+    assert calls[0]["operation"] == "nixos_options"
+    assert calls[0]["expect_json"] is True
+    args = calls[0]["args"]
+    assert args[:4] == ["eval", "--json", "--no-write-lock-file", f"{server.FLAKE_SOURCE}#nixosConfigurations"]
+    assert args[4] == "--apply"
+    expression = args[5]
+    assert expression.startswith("configurations: {")
+    assert expression.count('builtins.getAttr "heim-pc" configurations') == 2
+    assert '"services.openssh.enable" = (configurations:' in expression
+    assert '"networking.hostName" = (configurations:' in expression
+    assert '[ "services" "openssh" "enable" ]' in expression
+    assert '[ "networking" "hostName" ]' in expression
+    assert "definitionsWithLocations" in expression
+    assert "definition.value" not in expression
+    assert result["host"] == "heim-pc"
+    assert result["options"] == ["services.openssh.enable", "networking.hostName"]
+    assert result["value"] == {
+        "services.openssh.enable": False, "networking.hostName": "heim-pc"
+    }
+    assert result["option_metadata"]["services.openssh.enable"]["type_name"] == "bool"
+    assert "networking.hostName" not in result["option_metadata"]
+
+
+@pytest.mark.parametrize("options", [
+    [],
+    ["services.openssh.enable"] * 9,
+    ["services.openssh.enable", "services.openssh.enable"],
+    ["services.valid", "services.invalid;builtins.abort"],
+    ["services.valid", 1],
+    "services.openssh.enable",
+    None,
+])
+def test_nixos_options_rejects_unbounded_duplicate_or_injected_paths(monkeypatch: pytest.MonkeyPatch, options) -> None:
+    def forbidden_backend(*args, **kwargs):
+        raise AssertionError("invalid batch reached the Nix backend")
+    monkeypatch.setattr(server, "_docker_nix", forbidden_backend)
+    with pytest.raises(ValueError):
+        server.nixos_options("heim-pc", "heim-pc", options)
+    with pytest.raises(ValueError):
+        server.nixos_options("heim-pc", "one.two", ["services.openssh.enable"])
+
+
+def test_nixos_options_preserves_failed_or_incomplete_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "_docker_nix", lambda *a, **k: {
+        "ok": False, "status": "nix_failed", "result": {"returncode": 1}
+    })
+    result = server.nixos_options("heim-pc", "heim-pc", ["services.openssh.enable"])
+    assert result["status"] == "nix_failed"
+    assert "value" not in result
+    assert "option_metadata" not in result
+
+    monkeypatch.setattr(server, "_docker_nix", lambda *a, **k: {
+        "ok": True, "value": {"services.openssh.enable": {"option_metadata": {}}}
+    })
+    incomplete = server.nixos_options("heim-pc", "heim-pc", ["services.openssh.enable"])
+    assert incomplete["ok"] is False
+    assert incomplete["status"] == "invalid_json_output"
+    assert "value" not in incomplete
+    assert "option_metadata" not in incomplete
+
+
+def test_nixos_options_bounded_public_schema() -> None:
+    assert tuple(inspect.signature(server.nixos_options).parameters) == ("repo", "host", "options")
+    assert tuple(inspect.signature(server._mcp_nixos_options).parameters) == ("repo", "host", "options")
+    assert 1 < server.MAX_NIXOS_OPTION_BATCH <= 16
 
 
 def test_nixos_option_metadata_limits_are_small_and_positive() -> None:

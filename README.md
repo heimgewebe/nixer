@@ -16,10 +16,11 @@ Die öffentliche Fläche bleibt bewusst klein:
 - `flake_check` — Evaluation per `nix flake check --no-build`;
 - `eval_attr` — einen streng validierten Flake-Attributpfad evaluieren;
 - `nixos_option` — einen resultierenden NixOS-Optionswert zusammen mit begrenzten Typ-, Deklarations- und Definitionsort-Metadaten atomar evaluieren;
+- `nixos_options` — 1–8 Optionswerte und dieselben Herkunftsmetadaten in einer einzigen Nix-Evaluation desselben Repository-Snapshots ermitteln;
 - `derivation_show` — resultierende Derivation anzeigen;
 - `build_dry_run` — Buildplan prüfen, ohne den Output zu realisieren.
 
-Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. `nixos_option(repo, host, option)` behält seine Eingabesignatur unverändert und liefert Wert sowie – für einen exakt auflösbaren NixOS-Optionsdeskriptor – Typ und begrenzte Deklarations-/Definitionsorte aus einer einzigen serverdefinierten Nix-Evaluation desselben Snapshots. Verschachtelte Unterpfade innerhalb eines Optionswerts behalten ihr bisheriges Wertverhalten und liefern keine erfundenen Metadaten. Die Werte aus `definitionsWithLocations` werden niemals ausgegeben. Herkunftslisten sind serverseitig klein und defensiv begrenzt; `declaration_positions_truncated` beziehungsweise `definition_locations_truncated` kennzeichnen auch Einträge, die wegen ungültiger oder zu langer Herkunftsinformation verworfen wurden.
+Neue Diagnosefragen werden zunächst durch Kombination dieser Primitive gelöst, nicht durch ein neues Tool pro Frage. `nixos_options` bündelt wiederholte Optionsabfragen zu einem einzigen Wegwerfcontainer-/Git-Snapshot-Lauf, damit dieselbe Quellbasis für mehrere Werte gilt und Grabowski nicht die wiederholte Nix-Backend-Initialisierung orchestrieren muss. `nixos_option(repo, host, option)` behält seine Eingabesignatur unverändert und liefert Wert sowie – für einen exakt auflösbaren NixOS-Optionsdeskriptor – Typ und begrenzte Deklarations-/Definitionsorte aus einer einzigen serverdefinierten Nix-Evaluation desselben Snapshots. Verschachtelte Unterpfade innerhalb eines Optionswerts behalten ihr bisheriges Wertverhalten und liefern keine erfundenen Metadaten. Die Werte aus `definitionsWithLocations` werden niemals ausgegeben. Herkunftslisten sind serverseitig klein und defensiv begrenzt; `declaration_positions_truncated` beziehungsweise `definition_locations_truncated` kennzeichnen auch Einträge, die wegen ungültiger oder zu langer Herkunftsinformation verworfen wurden.
 
 ## Ausführungsmodell
 
