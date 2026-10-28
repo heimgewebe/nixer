@@ -828,3 +828,70 @@ def test_source_has_no_generic_shell_or_system_activation_primitive() -> None:
     assert "nixos-install" not in source
     assert '"switch"' not in source
     assert '"boot"' not in source
+
+
+def test_flake_metadata_preserves_git_revision_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def evaluate(_repo: str, args: list[str], **_kwargs: object) -> dict:
+        calls.append(args)
+        return {"ok": True, "status": "ok", "value": {"locks": {}}}
+
+    monkeypatch.setattr(server, "_docker_nix", evaluate)
+    assert server.flake_metadata("fixture")["ok"] is True
+    assert calls == [
+        ["flake", "metadata", "--json", "--no-write-lock-file", server.FLAKE_SOURCE]
+    ]
+
+
+def test_flake_metadata_recovers_shallow_git_revcount_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def evaluate(_repo: str, args: list[str], **_kwargs: object) -> dict:
+        calls.append(args)
+        if args[-1] == server.FLAKE_SOURCE:
+            return {
+                "ok": False,
+                "status": "nix_failed",
+                "result": {
+                    "stderr": "error: '/tmp/nixer-workspace' is a shallow Git repository, "
+                    "so 'revCount' is not available"
+                },
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "value": {"locks": {"nodes": {}}},
+            "backend": {"flake_source": server.FLAKE_SOURCE},
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", evaluate)
+    result = server.flake_metadata("fixture")
+    assert result["ok"] is True
+    assert result["value"] == {"locks": {"nodes": {}}}
+    assert result["source_fallback_reason"] == "shallow_git_revcount_unavailable"
+    assert result["backend"]["flake_source"] == f"path:{server.SNAPSHOT_ROOT}"
+    assert [args[-1] for args in calls] == [
+        server.FLAKE_SOURCE,
+        f"path:{server.SNAPSHOT_ROOT}",
+    ]
+
+
+def test_flake_metadata_does_not_retry_unrelated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def evaluate(_repo: str, _args: list[str], **_kwargs: object) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ok": False, "status": "nix_failed", "result": {"stderr": "network unavailable"}}
+
+    monkeypatch.setattr(server, "_docker_nix", evaluate)
+    result = server.flake_metadata("fixture")
+    assert result["status"] == "nix_failed"
+    assert calls == 1
