@@ -417,13 +417,35 @@ def nixer_status() -> dict[str, Any]:
 
 
 def flake_metadata(repo: str) -> dict[str, Any]:
-    """Read real metadata for a repository flake without writing its lock file."""
-    return _docker_nix(
+    """Read lock/input metadata, including from shallow Git checkouts."""
+    result = _docker_nix(
         repo,
         ["flake", "metadata", "--json", "--no-write-lock-file", FLAKE_SOURCE],
         operation="flake_metadata",
         expect_json=True,
     )
+    # Nix cannot report revCount for a shallow local Git flake. The already
+    # materialized, read-only source snapshot is still a valid path flake.
+    # Retry only this known metadata failure; preserve Git revision evidence
+    # for normal, non-shallow repositories.
+    stderr = result.get("result", {}).get("stderr", "")
+    if (
+        result.get("status") != "nix_failed"
+        or "shallow Git repository" not in stderr
+        or "'revCount' is not available" not in stderr
+    ):
+        return result
+    fallback_source = f"path:{SNAPSHOT_ROOT}"
+    fallback = _docker_nix(
+        repo,
+        ["flake", "metadata", "--json", "--no-write-lock-file", fallback_source],
+        operation="flake_metadata",
+        expect_json=True,
+    )
+    fallback["source_fallback_reason"] = "shallow_git_revcount_unavailable"
+    if fallback.get("ok"):
+        fallback["backend"]["flake_source"] = fallback_source
+    return fallback
 
 
 def flake_show(repo: str) -> dict[str, Any]:
