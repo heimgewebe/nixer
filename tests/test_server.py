@@ -847,38 +847,66 @@ def test_flake_metadata_preserves_git_revision_when_available(
 
 
 def test_flake_metadata_recovers_shallow_git_revcount_error(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    repo = _repo(tmp_path, monkeypatch)
     calls: list[list[str]] = []
+    monkeypatch.setattr(
+        server,
+        "_backend_probe",
+        lambda: {"ready": True, "reason": "ready", "image_id": server.PINNED_NIX_IMAGE_ID},
+    )
 
-    def evaluate(_repo: str, args: list[str], **_kwargs: object) -> dict:
-        calls.append(args)
-        if args[-1] == server.FLAKE_SOURCE:
-            return {
-                "ok": False,
-                "status": "nix_failed",
-                "result": {
-                    "stderr": "error: '/tmp/nixer-workspace' is a shallow Git repository, "
-                    "so 'revCount' is not available"
-                },
-            }
+    def fake_run(argv: list[str], *, timeout: int = 120) -> dict:
+        calls.append(argv)
         return {
-            "ok": True,
-            "status": "ok",
-            "value": {"locks": {"nodes": {}}},
-            "backend": {"flake_source": server.FLAKE_SOURCE},
+            "returncode": 0,
+            "stdout": '{"locks":{"nodes":{}}}\n',
+            "stderr": "NIXER_SHALLOW_FALLBACK_USED\n",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
         }
 
-    monkeypatch.setattr(server, "_docker_nix", evaluate)
-    result = server.flake_metadata("fixture")
+    monkeypatch.setattr(server, "_run", fake_run)
+    result = server.flake_metadata(str(repo))
     assert result["ok"] is True
     assert result["value"] == {"locks": {"nodes": {}}}
     assert result["source_fallback_reason"] == "shallow_git_revcount_unavailable"
     assert result["backend"]["flake_source"] == f"path:{server.SNAPSHOT_ROOT}"
-    assert [args[-1] for args in calls] == [
-        server.FLAKE_SOURCE,
-        f"path:{server.SNAPSHOT_ROOT}",
-    ]
+    assert result["result"]["stderr"] == ""
+    assert len(calls) == 1  # One snapshot and one container, not two.
+    assert "--nixer-flake-metadata-fallback" in calls[0]
+    script = calls[0][calls[0].index("-lc") + 1]
+    assert 'grep -Fq "shallow Git repository"' in script
+    assert 'grep -Fq "\u0027revCount\u0027 is not available"' in script
+    assert '"path:$SNAPSHOT"' in script
+
+
+def test_flake_metadata_unknown_failure_is_not_mislabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(server, "_backend_probe", lambda: {"ready": True})
+
+    def fake_run(argv: list[str], *, timeout: int = 120) -> dict:
+        calls.append(argv)
+        return {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "network unavailable",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(server, "_run", fake_run)
+    result = server.flake_metadata(str(repo))
+    assert result["status"] == "nix_failed"
+    assert "source_fallback_reason" not in result
+    assert result["backend"]["flake_source"] == server.FLAKE_SOURCE
+    assert len(calls) == 1
 
 
 def test_flake_metadata_does_not_retry_unrelated_errors(
@@ -895,3 +923,67 @@ def test_flake_metadata_does_not_retry_unrelated_errors(
     result = server.flake_metadata("fixture")
     assert result["status"] == "nix_failed"
     assert calls == 1
+
+def test_docker_nix_reports_source_identity_without_leaking_internal_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_backend_probe", lambda: {"ready": True})
+    git_head = "abcdef0123456789" * 2 + "abcdef01"
+
+    def fake_run(_argv: list[str], *, timeout: int = 120) -> dict:
+        return {
+            "returncode": 0,
+            "stdout": "{}\n",
+            "stderr": f"Cloning...\nNIXER_SOURCE_OBSERVED:{git_head}:1\nwarning: real warning\n",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(server, "_run", fake_run)
+    result = server._docker_nix(str(repo), ["flake", "metadata"], operation="flake_metadata")
+    assert result["source_observation"] == {
+        "git_head": git_head,
+        "tracked_dirty": True,
+        "untracked_excluded": True,
+        "authority": "observation_only",
+    }
+    assert result["result"]["stderr"] == "Cloning...\nwarning: real warning\n"
+    assert 'printf ' in server.SNAPSHOT_SCRIPT
+    assert 'NIXER_SOURCE_OBSERVED' in server.SNAPSHOT_SCRIPT
+
+
+def test_eval_attr_classifies_proven_missing_attribute_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_backend_probe", lambda: {"ready": True})
+    error = "error: flake 'git+file:///tmp/nixer-workspace' does not provide attribute 'absent'"
+
+    def fake_run(_argv: list[str], *, timeout: int = 120) -> dict:
+        return {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": error,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(server, "_run", fake_run)
+    result = server.eval_attr(str(repo), "absent")
+    assert result["status"] == "nix_failed"
+    assert result["failure_class"] == "attribute_missing"
+    assert result["retryable"] is False
+
+    unrelated = server._docker_nix(str(repo), ["flake", "show"], operation="flake_show")
+    assert "failure_class" not in unrelated
+    assert "retryable" not in unrelated
+
+
+def test_nixer_mcp_instructions_delegate_interpretation_and_operator_actions() -> None:
+    assert "Nixer exposes read-only Nix" in server.INSTRUCTIONS
+    assert "prefer nixos_options" in server.INSTRUCTIONS
+    assert "ChatGPT interprets evidence" in server.INSTRUCTIONS
+    assert "no general shell" in server.INSTRUCTIONS

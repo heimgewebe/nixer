@@ -44,9 +44,39 @@ if [ "$source_head" != "$snapshot_head" ]; then
     exit 86
 fi
 "$GIT" -c safe.directory=/workspace -C /workspace diff --binary --no-ext-diff --no-textconv HEAD -- > "$PATCH"
+tracked_dirty=0
 if [ -s "$PATCH" ]; then
     "$GIT" -C "$SNAPSHOT" apply --whitespace=nowarn "$PATCH"
     "$GIT" -C "$SNAPSHOT" add -A -- .
+    tracked_dirty=1
+fi
+# This marker records the checked-out source, not Git/PR/deployment authority.
+printf 'NIXER_SOURCE_OBSERVED:%s:%s\n' "$source_head" "$tracked_dirty" >&2
+# Only flake_metadata may retry the precisely recognized shallow-Git revCount error.
+# The original snapshot and the container are reused for the path: fallback.
+if [ "$#" -gt 0 ] && [ "$1" = "--nixer-flake-metadata-fallback" ]; then
+    shift
+    metadata_stdout=/tmp/nixer-metadata.stdout
+    metadata_stderr=/tmp/nixer-metadata.stderr
+    if "$NIX" --extra-experimental-features "nix-command flakes" --option allow-import-from-derivation false "$@" > "$metadata_stdout" 2> "$metadata_stderr"; then
+        cat "$metadata_stdout"
+        cat "$metadata_stderr" >&2
+        exit 0
+    else
+        metadata_exit=$?
+    fi
+    if grep -Fq "shallow Git repository" "$metadata_stderr" &&
+       grep -Fq "'revCount' is not available" "$metadata_stderr"; then
+        if "$NIX" --extra-experimental-features "nix-command flakes" --option allow-import-from-derivation false flake metadata --json --no-write-lock-file "path:$SNAPSHOT"; then
+            printf '%s\n' NIXER_SHALLOW_FALLBACK_USED >&2
+            exit 0
+        else
+            exit $?
+        fi
+    fi
+    cat "$metadata_stdout"
+    cat "$metadata_stderr" >&2
+    exit "$metadata_exit"
 fi
 exec "$NIX" --extra-experimental-features "nix-command flakes" --option allow-import-from-derivation false "$@"
 """
@@ -70,13 +100,14 @@ READ_ANNOTATIONS = ToolAnnotations(
     openWorldHint=True,
 )
 
-INSTRUCTIONS = """You are Nixer, a deliberately narrow specialist for Nix, Nixpkgs and NixOS.
-Do not act as a general Linux, GitHub, Bureau, deployment or project-management operator.
-Use the typed Nix tools to establish real evaluator evidence before recommending a workaround.
-Never claim that a value, derivation or flake output was verified when the backend did not run
-successfully. If the issue is not materially Nix-semantic, say so and hand it back to the general
-operator. Nixer proposes Nix changes but never commits, pushes, merges, deploys, switches or
-activates a system."""
+INSTRUCTIONS = """Nixer exposes read-only Nix, Nixpkgs and NixOS evaluator tools over MCP.
+For multiple NixOS options on the same host, prefer nixos_options (up to eight) to
+separate nixos_option calls; it uses one repository snapshot and one evaluation.
+Report technical evidence, including evaluated source, option value and definition
+locations, without claiming Git, PR, build or deployment authority.
+A successful backend evaluation is required before claiming a verified result.
+ChatGPT interprets evidence; the authorized operator handles source changes, Git,
+builds and deployment. Nixer has no general shell, task, lease or host control."""
 
 mcp = FastMCP(APP_NAME, instructions=INSTRUCTIONS)
 
@@ -329,6 +360,11 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
     if git_common_dir is not None:
         git_metadata_mount = f"type=bind,src={git_common_dir},dst={git_common_dir},readonly"
         argv.extend(["--mount", git_metadata_mount])
+    snapshot_args = (
+        ["--nixer-flake-metadata-fallback", *nix_args]
+        if operation == "flake_metadata"
+        else nix_args
+    )
     argv.extend([
         "--workdir=/workspace",
         "--entrypoint",
@@ -337,9 +373,25 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         "-lc",
         SNAPSHOT_SCRIPT,
         "nixer-snapshot",
-        *nix_args,
+        *snapshot_args,
     ])
     result = _run(argv)
+    source_match = re.search(
+        r"(?m)^NIXER_SOURCE_OBSERVED:([0-9a-f]{40}|[0-9a-f]{64}):([01])\r?\n",
+        result["stderr"],
+    )
+    if source_match:
+        result["stderr"] = (
+            result["stderr"][:source_match.start()] + result["stderr"][source_match.end():]
+        )
+    fallback_marker = "NIXER_SHALLOW_FALLBACK_USED\n"
+    metadata_fallback = (
+        operation == "flake_metadata"
+        and result["returncode"] == 0
+        and fallback_marker in result["stderr"]
+    )
+    if metadata_fallback:
+        result["stderr"] = result["stderr"].replace(fallback_marker, "", 1)
     payload: dict[str, Any] = {
         "schema_version": 1,
         "identity": IDENTITY,
@@ -365,6 +417,16 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         },
         "observed_at": observed_at,
     }
+    if source_match:
+        payload["source_observation"] = {
+            "git_head": source_match.group(1),
+            "tracked_dirty": source_match.group(2) == "1",
+            "untracked_excluded": True,
+            "authority": "observation_only",
+        }
+    if metadata_fallback:
+        payload["source_fallback_reason"] = "shallow_git_revcount_unavailable"
+        payload["backend"]["flake_source"] = f"path:{SNAPSHOT_ROOT}"
     if expect_json and result["returncode"] == 0:
         try:
             payload["value"] = json.loads(result["stdout"])
@@ -372,6 +434,22 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
             payload["ok"] = False
             payload["status"] = "invalid_json_output"
             payload["json_error"] = str(exc)
+    # Classify only failure modes supported by the actual evaluator result.
+    if result["timed_out"]:
+        payload["failure_class"] = "timeout"
+    elif (
+        operation == "eval_attr"
+        and result["returncode"] != 0
+        and "error: flake '" in result["stderr"]
+        and "does not provide attribute" in result["stderr"]
+    ):
+        payload["failure_class"] = "attribute_missing"
+        payload["retryable"] = False
+    elif (
+        result["returncode"] == 127
+        and result["stderr"] == "container client executable unavailable"
+    ):
+        payload["failure_class"] = "container_client_unavailable"
     return payload
 
 
@@ -418,35 +496,12 @@ def nixer_status() -> dict[str, Any]:
 
 def flake_metadata(repo: str) -> dict[str, Any]:
     """Read lock/input metadata, including from shallow Git checkouts."""
-    result = _docker_nix(
+    return _docker_nix(
         repo,
         ["flake", "metadata", "--json", "--no-write-lock-file", FLAKE_SOURCE],
         operation="flake_metadata",
         expect_json=True,
     )
-    # Nix cannot report revCount for a shallow local Git flake. The already
-    # materialized, read-only source snapshot is still a valid path flake.
-    # Retry only this known metadata failure; preserve Git revision evidence
-    # for normal, non-shallow repositories.
-    stderr = result.get("result", {}).get("stderr", "")
-    if (
-        result.get("status") != "nix_failed"
-        or "shallow Git repository" not in stderr
-        or "'revCount' is not available" not in stderr
-    ):
-        return result
-    fallback_source = f"path:{SNAPSHOT_ROOT}"
-    fallback = _docker_nix(
-        repo,
-        ["flake", "metadata", "--json", "--no-write-lock-file", fallback_source],
-        operation="flake_metadata",
-        expect_json=True,
-    )
-    fallback["source_fallback_reason"] = "shallow_git_revcount_unavailable"
-    if fallback.get("ok"):
-        fallback["backend"]["flake_source"] = fallback_source
-    return fallback
-
 
 def flake_show(repo: str) -> dict[str, Any]:
     """Evaluate and return the output structure of a repository flake."""
