@@ -3,7 +3,7 @@
 
   # Nixer owns its runtime dependency set. Host flakes pin Nixer as a product;
   # they do not substitute their own Nixpkgs into Nixer's Python environment.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = { self, nixpkgs }:
     let
@@ -142,6 +142,12 @@
 
       checks = forAllSystems (pkgs: {
         package = packageFor pkgs;
+        brotli-runtime =
+          assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";
+          assert pkgs.lib.versionAtLeast pkgs.python3Packages.brotli.version "1.2.1";
+          pkgs.runCommand "nixer-brotli-1.2.1-runtime-contract" { } ''
+            touch "$out"
+          '';
       });
 
       nixosModules.default = { config, lib, pkgs, ... }:

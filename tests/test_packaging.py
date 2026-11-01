@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import server
@@ -31,6 +32,19 @@ def test_flake_exports_package_nixos_module_and_evidence_adapter() -> None:
     assert "cp ${./image_pin.py}" in source
     assert '"$out/bin/nixer-evidence"' in source
     assert '"$out/bin/nixer-image-pin"' in source
+
+
+def test_independent_nixer_runtime_pins_native_and_python_brotli() -> None:
+    source = (ROOT / "flake.nix").read_text(encoding="utf-8")
+    assert 'inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";' in source
+    pin = json.loads((ROOT / "flake.lock").read_text(encoding="utf-8"))["nodes"]["nixpkgs"]
+    assert pin["original"]["ref"] == "nixos-26.05"
+    assert pin["locked"]["rev"] == "fa1373130d5a21c040a47c5dbe1913d59ed91808"
+    assert pin["locked"]["narHash"] == "sha256-HzgjxrLY4AEc0044ZuM5CHbLSWLZgDlay1idmzvvpJs="
+    assert "brotliSecurityOverlay" not in source
+    assert 'assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";' in source
+    assert 'assert pkgs.lib.versionAtLeast pkgs.python3Packages.brotli.version "1.2.1";' in source
+
 
 
 def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() -> None:
