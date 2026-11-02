@@ -25,6 +25,10 @@ CONTAINER_HOME = os.environ.get("NIXER_CONTAINER_HOME", os.environ.get("HOME", s
 CONTAINER_XDG_RUNTIME_DIR = os.environ.get(
     "NIXER_CONTAINER_XDG_RUNTIME_DIR", os.environ.get("XDG_RUNTIME_DIR", "")
 )
+# The Nix package wrapper fixes this to a Nix store output from its own
+# independently pinned, Brotli >= 1.2.1 Nixpkgs. Never use an arbitrary
+# host path or the vulnerable decoder shipped with the unchanged OCI image.
+BROTLI_LIBRARY_DIR = os.environ.get("NIXER_BROTLI_LIB_DIR", "")
 NIX_BIN = "/nix/var/nix/profiles/default/bin/nix"
 GIT_BIN = "/nix/var/nix/profiles/default/bin/git"
 BASH_BIN = "/nix/var/nix/profiles/default/bin/bash"
@@ -36,6 +40,12 @@ GIT=/nix/var/nix/profiles/default/bin/git
 NIX=/nix/var/nix/profiles/default/bin/nix
 SNAPSHOT=/tmp/nixer-workspace
 PATCH=/tmp/nixer-worktree.patch
+# The pinned image itself still ships Brotli 1.2.0. Prove that this disposable
+# Nix subprocess actually loads the package-owned patched decoder.
+if ! /nix/var/nix/profiles/default/bin/curl --version | grep -Fq 'brotli/1.2.1'; then
+    printf 'Nixer patched Brotli decoder is not active\n' >&2
+    exit 85
+fi
 "$GIT" -c safe.directory=/workspace clone --no-local --no-hardlinks /workspace "$SNAPSHOT" >/dev/null
 source_head="$("$GIT" -c safe.directory=/workspace -C /workspace rev-parse HEAD)"
 snapshot_head="$("$GIT" -C "$SNAPSHOT" rev-parse HEAD)"
@@ -114,6 +124,15 @@ mcp = FastMCP(APP_NAME, instructions=INSTRUCTIONS)
 _ATTR_PATH_RE = re.compile(r"^[A-Za-z0-9_+\-]+(?:\.[A-Za-z0-9_+\-]+)*$")
 _REPO_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _IMAGE_ID_RE = re.compile(r"^(?:sha256:)?([0-9A-Fa-f]{64})$")
+_BROTLI_LIBRARY_DIR_RE = re.compile(
+    r"^/nix/store/[0-9a-z]{32}-brotli-1\.2\.1-lib/lib$"
+)
+BROTLI_CONTAINER_MOUNT = "/run/nixer-brotli"
+_BROTLI_REQUIRED_SONAMES = (
+    "libbrotlicommon.so.1",
+    "libbrotlidec.so.1",
+    "libbrotlienc.so.1",
+)
 _SECRET_PATTERNS = (
     re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -277,6 +296,33 @@ def _canonical_image_id(value: str) -> str | None:
     return f"sha256:{match.group(1).lower()}"
 
 
+def _brotli_runtime_probe() -> dict[str, Any]:
+    """Verify the package-owned patched library exists before any OCI run."""
+    name = BROTLI_LIBRARY_DIR
+    if not _BROTLI_LIBRARY_DIR_RE.fullmatch(name):
+        return {"ready": False, "reason": "patched_brotli_store_path_missing"}
+    root = Path(name)
+    if root.is_symlink() or not root.is_dir() or any(
+        not (root / soname).is_file() for soname in _BROTLI_REQUIRED_SONAMES
+    ):
+        return {"ready": False, "reason": "patched_brotli_library_missing"}
+    return {"ready": True, "library_dir": name, "version": "1.2.1"}
+
+
+def _brotli_container_args() -> list[str]:
+    """Only read-only mount + loader path, shared by all Nixer Nix entrypoints."""
+    runtime = _brotli_runtime_probe()
+    if not runtime["ready"]:
+        raise RuntimeError(runtime["reason"])
+    library_dir = runtime["library_dir"]
+    return [
+        "--mount",
+        f"type=bind,src={library_dir},dst={BROTLI_CONTAINER_MOUNT},readonly",
+        "--env",
+        f"LD_LIBRARY_PATH={BROTLI_CONTAINER_MOUNT}",
+    ]
+
+
 def _backend_probe() -> dict[str, Any]:
     if not DOCKER_BIN.is_absolute():
         return {
@@ -317,6 +363,15 @@ def _backend_probe() -> dict[str, Any]:
             "actual_image_id": actual_raw,
             "probe": inspected,
         }
+    brotli = _brotli_runtime_probe()
+    if not brotli["ready"]:
+        return {
+            "ready": False,
+            "reason": brotli["reason"],
+            "container_client": str(DOCKER_BIN),
+            "image_id": actual,
+            "image_ref_evidence": PINNED_NIX_IMAGE_REF,
+        }
     return {
         "ready": True,
         "reason": "ready",
@@ -324,6 +379,8 @@ def _backend_probe() -> dict[str, Any]:
         "image_id": actual,
         "image_tag_evidence": PINNED_NIX_IMAGE_TAG,
         "image_ref_evidence": PINNED_NIX_IMAGE_REF,
+        "brotli_library_dir": brotli["library_dir"],
+        "brotli_version": brotli["version"],
     }
 
 
@@ -356,6 +413,7 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         "--security-opt=no-new-privileges",
         "--mount",
         mount,
+        *_brotli_container_args(),
     ]
     if git_common_dir is not None:
         git_metadata_mount = f"type=bind,src={git_common_dir},dst={git_common_dir},readonly"

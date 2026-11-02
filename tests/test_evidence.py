@@ -8,6 +8,17 @@ import pytest
 
 import evidence
 
+_TEST_BROTLI_LIB = "/nix/store/" + ("a" * 32) + "-brotli-1.2.1-lib/lib"
+
+
+@pytest.fixture(autouse=True)
+def _pinned_brotli_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        evidence.server,
+        "_brotli_runtime_probe",
+        lambda: {"ready": True, "library_dir": _TEST_BROTLI_LIB, "version": "1.2.1"},
+    )
+
 
 def test_system_build_script_reuses_snapshot_semantics() -> None:
     assert 'diff --binary --no-ext-diff --no-textconv HEAD -- > "$PATCH"' in evidence.SYSTEM_BUILD_SCRIPT
@@ -18,6 +29,7 @@ def test_system_build_script_reuses_snapshot_semantics() -> None:
     assert "path-info -S --json" in evidence.SYSTEM_BUILD_SCRIPT
     assert "NIXER_BOOTSPEC_SIZE" in evidence.SYSTEM_BUILD_SCRIPT
     assert "over_size_limit" in evidence.SYSTEM_BUILD_SCRIPT
+    assert "Nixer patched Brotli decoder is not active" in evidence.SYSTEM_BUILD_SCRIPT
 
 
 def test_system_build_argv_is_fixed_and_hardened(tmp_path: Path) -> None:
@@ -32,8 +44,22 @@ def test_system_build_argv_is_fixed_and_hardened(tmp_path: Path) -> None:
     assert "--cap-add=SETUID" not in argv
     assert "--cap-add=SETGID" not in argv
     assert "--security-opt=no-new-privileges" in argv
+    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={evidence.server.BROTLI_CONTAINER_MOUNT},readonly" in argv
+    assert "LD_LIBRARY_PATH=" + evidence.server.BROTLI_CONTAINER_MOUNT in argv
     assert evidence.server.PINNED_NIX_IMAGE_ID in argv
     assert argv[-1] == "heim-pc"
+
+
+def test_system_build_rejects_unpatched_brotli_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        evidence.server,
+        "_brotli_runtime_probe",
+        lambda: {"ready": False, "reason": "patched_brotli_store_path_missing"},
+    )
+    with pytest.raises(RuntimeError, match="patched_brotli_store_path_missing"):
+        evidence._system_build_argv(tmp_path, None, "heim-pc")
 
 
 def test_append_bounded_reports_actual_truncation_only() -> None:

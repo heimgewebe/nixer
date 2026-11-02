@@ -124,22 +124,24 @@ python3 -m venv .venv
 .venv/bin/ruff check server.py evidence.py tests
 ```
 
-Lokal per stdio:
+Die virtuelle Umgebung dient weiterhin den Tests. Für einen **laufenden Nixer-Dienst** muss dagegen der Nix-Paketwrapper gestartet werden: Nur dieser bindet die aus Nixers Flake gepinnte Brotli-1.2.1-Bibliothek über `NIXER_BROTLI_LIB_DIR` an alle Container-Nix-Prozesse. Ein direkter `.venv/bin/python server.py`-Start ohne diese Bibliothek meldet absichtlich `backend_unavailable` und ist kein unterstützter Produktivstart.
+
+Lokal per stdio (mit vorbereitetem, gepinntem Containerimage):
 
 ```bash
-.venv/bin/python server.py --transport stdio
+nix run .#nixer -- --transport stdio
 ```
 
 HTTP bindet ausschließlich Loopback:
 
 ```bash
-.venv/bin/python server.py --transport streamable-http --host 127.0.0.1 --port 18187
+nix run .#nixer -- --transport streamable-http --host 127.0.0.1 --port 18187
 ```
 
 Die Flake-Evaluation ist auch aus Grabowski-Linked-Worktrees unterstützt; deren Git-Common-Dir wird nur read-only für die Snapshot-Erzeugung sichtbar gemacht.
 
 ## Übergangs-Deployment
 
-Die bisherigen Dateien unter `deploy/` bleiben vorerst erhalten, weil der derzeit laufende Dienst noch daraus installiert ist. Sie sind eine Übergangsoberfläche, bis der konkrete Host Nixer über `nixosModules.default` und eine gepinnte Flake-Revision betreibt.
+Die Dateien unter `deploy/` dokumentieren die frühere Python-venv-/Tunnel-Installation; **sie sind nicht mehr der unterstützte Produktivstart**. Auf `heim-pc` läuft der deklarative NixOS-Dienst `nixer-headless.service` über das paketierte Nixer. Die alte `deploy/nixer-mcp.service` stellt `NIXER_BROTLI_LIB_DIR` nicht bereit und ist mit der gepatchten OCI-Laufzeit ausdrücklich nicht funktionsfähig; nicht neu installieren. Eine andere Installation muss ebenfalls den Nix-Paketwrapper und seinen gebundenen Brotli-Storepfad verwenden.
 
 Der OpenAI-Tunnel bleibt eine separate Host-/Betriebsintegration. Secret-Provisionierung und ChatGPT-Connector-Erstellung gehören ausdrücklich nicht zum Nixer-Repo.

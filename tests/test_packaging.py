@@ -44,7 +44,23 @@ def test_independent_nixer_runtime_pins_native_and_python_brotli() -> None:
     assert "brotliSecurityOverlay" not in source
     assert 'assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";' in source
     assert 'assert pkgs.lib.versionAtLeast pkgs.python3Packages.brotli.version "1.2.1";' in source
+    assert 'brotliRuntime = assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";' in source
+    assert '"${pkgs.brotli.lib}/lib";' in source
+    assert source.count('--set NIXER_BROTLI_LIB_DIR "${brotliRuntime}"') == 2
+    # The two exact runtime entrypoints share the same retained native lib.
+    assert '"$out/bin/nixer-image-pin"' in source
 
+
+
+def test_all_nixer_container_subprocesses_mount_pinned_brotli_readonly() -> None:
+    server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+    evidence_source = (ROOT / "evidence.py").read_text(encoding="utf-8")
+    assert "*_brotli_container_args()" in server_source
+    assert "*server._brotli_container_args()" in evidence_source
+    assert "LD_LIBRARY_PATH=" in server_source
+    assert "readonly" in server_source
+    assert "Nixer patched Brotli decoder is not active" in server.SNAPSHOT_SCRIPT
+    assert "Nixer patched Brotli decoder is not active" in evidence_source
 
 
 def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() -> None:
@@ -71,6 +87,19 @@ def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() ->
         "disabledTests =", 1
     )[1]
     assert 'dontUsePytestXdist = true;' in source
+
+
+def test_supported_nixer_launch_uses_pinned_brotli_package_wrapper() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    development = readme.split("## Entwicklung", 1)[1].split("## Übergangs-Deployment", 1)[0]
+    assert "nix run .#nixer -- --transport stdio" in development
+    assert "nix run .#nixer -- --transport streamable-http" in development
+    assert ".venv/bin/python server.py --transport" not in development
+
+    legacy = (ROOT / "deploy" / "nixer-mcp.service").read_text(encoding="utf-8")
+    assert "Historical reference only" in legacy
+    assert "NIXER_BROTLI_LIB_DIR" in legacy
+    assert "nixer-headless.service" in readme
 
 
 def test_nixos_module_keeps_mcp_loopback_only() -> None:

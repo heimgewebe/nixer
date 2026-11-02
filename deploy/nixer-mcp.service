@@ -1,3 +1,7 @@
+# Historical reference only. NOT the supported Nixer service after NixOS migration.
+# This direct-venv launcher has no NIXER_BROTLI_LIB_DIR from the pinned Nix
+# package wrapper and deliberately cannot pass the patched OCI backend probe.
+# Use the NixOS nixer-headless.service (or packaged `nix run .#nixer`) instead.
 [Unit]
 Description=Nixer Nix specialist MCP
 After=network-online.target
