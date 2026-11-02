@@ -53,6 +53,13 @@ HOST="$1"
 FLAKE="git+file://$SNAPSHOT"
 stage=bootstrap
 
+# Nix CLI and Curl inside the fixed image must load the same patched library
+# passed by server._brotli_container_args(), not the image's Brotli 1.2.0.
+if ! /nix/var/nix/profiles/default/bin/curl --version | grep -Fq 'brotli/1.2.1'; then
+    printf 'Nixer patched Brotli decoder is not active\n' >&2
+    exit 85
+fi
+
 stage_fail_code() {
     failure_rc="$1"
     trap - ERR
@@ -608,6 +615,7 @@ def _system_build_argv(root: Path, git_common_dir: Path | None, host: str) -> li
         "--security-opt=no-new-privileges",
         "--mount",
         mount,
+        *server._brotli_container_args(),
     ]
     if git_common_dir is not None:
         argv.extend(

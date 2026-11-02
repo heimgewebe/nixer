@@ -11,6 +11,21 @@ import pytest
 import server
 
 
+# Existing mock-backed backend tests model a valid pinned OCI execution.
+# The actual library presence and version checks have separate negative tests.
+_ORIGINAL_BROTLI_PROBE = server._brotli_runtime_probe
+_TEST_BROTLI_LIB = "/nix/store/" + ("a" * 32) + "-brotli-1.2.1-lib/lib"
+
+
+@pytest.fixture(autouse=True)
+def _pinned_brotli_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        server,
+        "_brotli_runtime_probe",
+        lambda: {"ready": True, "library_dir": _TEST_BROTLI_LIB, "version": "1.2.1"},
+    )
+
+
 def _repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repos"
     repo = root / "fixture"
@@ -180,6 +195,45 @@ def test_shared_redactor_consumes_punctuation_in_unquoted_credentials(payload: s
     assert redacted == "<REDACTED>"
 
 
+def test_brotli_runtime_rejects_old_or_unpinned_oci_decoder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for candidate in (
+        "",
+        str(tmp_path),
+        "/nix/store/" + ("a" * 32) + "-brotli-1.2.0-lib/lib",
+        "/nix/store/" + ("a" * 32) + "-brotli-1.2.1-lib/lib",
+    ):
+        monkeypatch.setattr(server, "BROTLI_LIBRARY_DIR", candidate)
+        runtime = _ORIGINAL_BROTLI_PROBE()
+        assert runtime["ready"] is False
+    assert runtime["reason"] == "patched_brotli_library_missing"
+
+
+def test_brotli_missing_after_image_probe_blocks_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = tmp_path / "podman"
+    client.touch()
+    monkeypatch.setattr(server, "DOCKER_BIN", client)
+    monkeypatch.setattr(server, "_run", lambda *args, **kwargs: {
+        "returncode": 0,
+        "stdout": server.PINNED_NIX_IMAGE_ID + "\n",
+        "stderr": "",
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "timed_out": False,
+    })
+    monkeypatch.setattr(
+        server,
+        "_brotli_runtime_probe",
+        lambda: {"ready": False, "reason": "patched_brotli_store_path_missing"},
+    )
+    backend = server._backend_probe()
+    assert backend["ready"] is False
+    assert backend["reason"] == "patched_brotli_store_path_missing"
+
+
 def test_backend_probe_rejects_relative_container_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "DOCKER_BIN", Path("podman"))
     backend = server._backend_probe()
@@ -326,6 +380,8 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     assert server.BASH_BIN in captured
     assert f"type=bind,src={repo},dst=/workspace,readonly" in captured
     assert "/var/run/docker.sock" not in " ".join(captured)
+    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={_TEST_BROTLI_LIB},readonly" in captured
+    assert "LD_LIBRARY_PATH=" + _TEST_BROTLI_LIB in captured
     assert server.FLAKE_SOURCE in captured
     assert result["backend"]["linked_worktree_git_metadata"] == "in-worktree"
     script = captured[captured.index("-lc") + 1]
@@ -334,6 +390,7 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     assert "clone --no-local --no-hardlinks" in script
     assert "diff --binary --no-ext-diff --no-textconv HEAD" in script
     assert 'allow-import-from-derivation false "$@"' in script
+    assert "Nixer patched Brotli decoder is not active" in script
 
 
 def test_linked_worktree_mounts_only_exact_common_git_dir_read_only(

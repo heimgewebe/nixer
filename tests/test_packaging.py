@@ -44,7 +44,23 @@ def test_independent_nixer_runtime_pins_native_and_python_brotli() -> None:
     assert "brotliSecurityOverlay" not in source
     assert 'assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";' in source
     assert 'assert pkgs.lib.versionAtLeast pkgs.python3Packages.brotli.version "1.2.1";' in source
+    assert 'brotliRuntime = assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";' in source
+    assert '"${pkgs.brotli.lib}/lib";' in source
+    assert source.count('--set NIXER_BROTLI_LIB_DIR "${brotliRuntime}"') == 2
+    # The two exact runtime entrypoints share the same retained native lib.
+    assert '"$out/bin/nixer-image-pin"' in source
 
+
+
+def test_all_nixer_container_subprocesses_mount_pinned_brotli_readonly() -> None:
+    server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+    evidence_source = (ROOT / "evidence.py").read_text(encoding="utf-8")
+    assert "*_brotli_container_args()" in server_source
+    assert "*server._brotli_container_args()" in evidence_source
+    assert "LD_LIBRARY_PATH=" in server_source
+    assert "readonly" in server_source
+    assert "Nixer patched Brotli decoder is not active" in server.SNAPSHOT_SCRIPT
+    assert "Nixer patched Brotli decoder is not active" in evidence_source
 
 
 def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() -> None:

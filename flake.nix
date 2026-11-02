@@ -104,6 +104,10 @@
             disabledTests = (old.disabledTests or [ ]) ++ [ "test_permission_error" ];
           });
           python = pkgs.python3.withPackages (_ps: [ mcp130 ]);
+          # Retain the 1.2.1 ABI output as a store reference in the wrapper.
+          # The OCI image's unpatched decoder must never be used by Nix tools.
+          brotliRuntime = assert pkgs.lib.versionAtLeast pkgs.brotli.version "1.2.1";
+            "${pkgs.brotli.lib}/lib";
         in
         pkgs.stdenvNoCC.mkDerivation {
           pname = "nixer";
@@ -119,8 +123,10 @@
             cp ${./evidence.py} "$out/libexec/nixer/evidence.py"
             cp ${./image_pin.py} "$out/libexec/nixer/image_pin.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer" \
+              --set NIXER_BROTLI_LIB_DIR "${brotliRuntime}" \
               --add-flags "$out/libexec/nixer/server.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer-evidence" \
+              --set NIXER_BROTLI_LIB_DIR "${brotliRuntime}" \
               --add-flags "$out/libexec/nixer/evidence.py"
             makeWrapper ${python}/bin/python "$out/bin/nixer-image-pin" \
               --add-flags "$out/libexec/nixer/image_pin.py"
