@@ -8,7 +8,6 @@ import pytest
 
 import evidence
 
-
 _TEST_BROTLI_LIB = "/nix/store/" + ("a" * 32) + "-brotli-1.2.1-lib/lib"
 
 

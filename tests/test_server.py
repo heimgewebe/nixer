@@ -10,7 +10,6 @@ import pytest
 
 import server
 
-
 # Existing mock-backed backend tests model a valid pinned OCI execution.
 # The actual library presence and version checks have separate negative tests.
 _ORIGINAL_BROTLI_PROBE = server._brotli_runtime_probe
