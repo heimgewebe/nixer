@@ -127,6 +127,7 @@ _IMAGE_ID_RE = re.compile(r"^(?:sha256:)?([0-9A-Fa-f]{64})$")
 _BROTLI_LIBRARY_DIR_RE = re.compile(
     r"^/nix/store/[0-9a-z]{32}-brotli-1\.2\.1-lib/lib$"
 )
+BROTLI_CONTAINER_MOUNT = "/run/nixer-brotli"
 _BROTLI_REQUIRED_SONAMES = (
     "libbrotlicommon.so.1",
     "libbrotlidec.so.1",
@@ -316,9 +317,9 @@ def _brotli_container_args() -> list[str]:
     library_dir = runtime["library_dir"]
     return [
         "--mount",
-        f"type=bind,src={library_dir},dst={library_dir},readonly",
+        f"type=bind,src={library_dir},dst={BROTLI_CONTAINER_MOUNT},readonly",
         "--env",
-        f"LD_LIBRARY_PATH={library_dir}",
+        f"LD_LIBRARY_PATH={BROTLI_CONTAINER_MOUNT}",
     ]
 
 

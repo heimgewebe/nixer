@@ -44,8 +44,8 @@ def test_system_build_argv_is_fixed_and_hardened(tmp_path: Path) -> None:
     assert "--cap-add=SETUID" not in argv
     assert "--cap-add=SETGID" not in argv
     assert "--security-opt=no-new-privileges" in argv
-    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={_TEST_BROTLI_LIB},readonly" in argv
-    assert "LD_LIBRARY_PATH=" + _TEST_BROTLI_LIB in argv
+    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={evidence.server.BROTLI_CONTAINER_MOUNT},readonly" in argv
+    assert "LD_LIBRARY_PATH=" + evidence.server.BROTLI_CONTAINER_MOUNT in argv
     assert evidence.server.PINNED_NIX_IMAGE_ID in argv
     assert argv[-1] == "heim-pc"
 

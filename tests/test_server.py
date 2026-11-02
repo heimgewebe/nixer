@@ -379,8 +379,8 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     assert server.BASH_BIN in captured
     assert f"type=bind,src={repo},dst=/workspace,readonly" in captured
     assert "/var/run/docker.sock" not in " ".join(captured)
-    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={_TEST_BROTLI_LIB},readonly" in captured
-    assert "LD_LIBRARY_PATH=" + _TEST_BROTLI_LIB in captured
+    assert f"type=bind,src={_TEST_BROTLI_LIB},dst={server.BROTLI_CONTAINER_MOUNT},readonly" in captured
+    assert "LD_LIBRARY_PATH=" + server.BROTLI_CONTAINER_MOUNT in captured
     assert server.FLAKE_SOURCE in captured
     assert result["backend"]["linked_worktree_git_metadata"] == "in-worktree"
     script = captured[captured.index("-lc") + 1]
