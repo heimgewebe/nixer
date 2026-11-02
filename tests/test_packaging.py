@@ -89,6 +89,19 @@ def test_upstream_non_sdk_notification_fixture_uses_dedicated_loopback_host() ->
     assert 'dontUsePytestXdist = true;' in source
 
 
+def test_supported_nixer_launch_uses_pinned_brotli_package_wrapper() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    development = readme.split("## Entwicklung", 1)[1].split("## Übergangs-Deployment", 1)[0]
+    assert "nix run .#nixer -- --transport stdio" in development
+    assert "nix run .#nixer -- --transport streamable-http" in development
+    assert ".venv/bin/python server.py --transport" not in development
+
+    legacy = (ROOT / "deploy" / "nixer-mcp.service").read_text(encoding="utf-8")
+    assert "Historical reference only" in legacy
+    assert "NIXER_BROTLI_LIB_DIR" in legacy
+    assert "nixer-headless.service" in readme
+
+
 def test_nixos_module_keeps_mcp_loopback_only() -> None:
     source = (ROOT / "nix" / "module.nix").read_text(encoding="utf-8")
     assert "--host 127.0.0.1" in source
