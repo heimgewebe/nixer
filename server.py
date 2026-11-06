@@ -844,8 +844,41 @@ def derivation_show(repo: str, attribute: str) -> dict[str, Any]:
     return result
 
 
+def _dry_run_plan(stderr: str, stderr_truncated: bool) -> dict[str, Any]:
+    """Extract only counts actually reported by Nix, never infer zero work."""
+    builds = re.search(
+        r"(?m)^(?:these (?P<count>\d+) derivations|this derivation) will be built:$",
+        stderr,
+    )
+    fetches = re.search(
+        r"(?m)^(?:these (?P<count>\d+) paths|this path) will be fetched"
+        r"(?: \((?P<sizes>[^\n()]*)\))?:$",
+        stderr,
+    )
+    plan: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "reported" if builds or fetches else "not_reported",
+        "build_count": int(builds.group("count") or 1) if builds else None,
+        "fetch_count": int(fetches.group("count") or 1) if fetches else None,
+        "download_size": None,
+        "unpacked_size": None,
+        "source": "nix_build_dry_run_stderr",
+        "raw_stderr_truncated": stderr_truncated,
+    }
+    if fetches and fetches.group("sizes"):
+        sizes = re.fullmatch(
+            r"(?P<download>[\d.]+ [KMGT]iB) download, "
+            r"(?P<unpacked>[\d.]+ [KMGT]iB) unpacked",
+            fetches.group("sizes"),
+        )
+        if sizes:
+            plan["download_size"] = sizes.group("download")
+            plan["unpacked_size"] = sizes.group("unpacked")
+    return plan
+
+
 def build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
-    """Ask Nix what a build would realize, without building or linking the output."""
+    """Return a compact Nix-reported build plan without building anything."""
     attr = _validate_attr_path(attribute, field="attribute")
     installable = f"{FLAKE_SOURCE}#{attr}"
     result = _docker_nix(
@@ -853,6 +886,21 @@ def build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
         ["build", "--dry-run", "--no-link", "--no-write-lock-file", installable],
         operation="build_dry_run",
     )
+    output = result.get("result")
+    # Preserve complete stderr on errors, including failures whose format Nix
+    # changed. Compact only successful, recognized path lists.
+    if result.get("ok") and isinstance(output, dict) and isinstance(output.get("stderr"), str):
+        stderr = output["stderr"]
+        plan = _dry_run_plan(stderr, bool(output.get("stderr_truncated")))
+        result["plan"] = plan
+        if plan["status"] == "reported":
+            lines = stderr.splitlines(keepends=True)
+            retained = [line for line in lines if not re.match(r"^  /nix/store/\S+\s*$", line)]
+            omitted = len(lines) - len(retained)
+            if omitted:
+                output["stderr"] = "".join(retained)
+                output["stderr_summarized"] = True
+                output["omitted_store_path_lines"] = omitted
     result["attribute"] = attr
     return result
 

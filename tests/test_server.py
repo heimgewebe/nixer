@@ -1043,3 +1043,95 @@ def test_nixer_mcp_instructions_delegate_interpretation_and_operator_actions() -
     assert "prefer nixos_options" in server.INSTRUCTIONS
     assert "ChatGPT interprets evidence" in server.INSTRUCTIONS
     assert "no general shell" in server.INSTRUCTIONS
+
+def test_dry_run_reports_structured_counts_and_summarizes_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = (
+        "warning: unrelated diagnostic\n"
+        "these 5 derivations will be built:\n"
+        "  /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv\n"
+        "these 175 paths will be fetched (234.8 MiB download, 744.3 MiB unpacked):\n"
+        "  /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-example\n"
+        "warning: retained after path listing\n"
+    )
+
+    def fake_backend(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "status": "ok",
+            "source_observation": {"git_head": "a" * 40, "authority": "observation_only"},
+            "result": {"returncode": 0, "stderr": stderr, "stderr_truncated": False},
+        }
+
+    monkeypatch.setattr(server, "_docker_nix", fake_backend)
+    actual = server.build_dry_run("nixer", "packages.x86_64-linux.default")
+    assert actual["attribute"] == "packages.x86_64-linux.default"
+    assert actual["source_observation"]["git_head"] == "a" * 40
+    assert actual["plan"] == {
+        "schema_version": 1,
+        "status": "reported",
+        "build_count": 5,
+        "fetch_count": 175,
+        "download_size": "234.8 MiB",
+        "unpacked_size": "744.3 MiB",
+        "source": "nix_build_dry_run_stderr",
+        "raw_stderr_truncated": False,
+    }
+    assert actual["result"]["stderr_summarized"] is True
+    assert actual["result"]["omitted_store_path_lines"] == 2
+    assert "/nix/store/" not in actual["result"]["stderr"]
+    assert "warning: unrelated diagnostic" in actual["result"]["stderr"]
+    assert "warning: retained after path listing" in actual["result"]["stderr"]
+
+
+def test_dry_run_failure_retains_complete_error_and_never_claims_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = "error: cannot evaluate derivation\n  /nix/store/abc\n"
+    monkeypatch.setattr(server, "_docker_nix", lambda *_a, **_k: {
+        "ok": False,
+        "status": "nix_failed",
+        "result": {"returncode": 1, "stderr": error, "stderr_truncated": False},
+    })
+    actual = server.build_dry_run("nixer", "packages.x86_64-linux.default")
+    assert actual["result"]["stderr"] == error
+    assert "plan" not in actual
+    assert "stderr_summarized" not in actual["result"]
+
+
+def test_dry_run_does_not_invent_zero_for_unreported_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_docker_nix", lambda *_a, **_k: {
+        "ok": True,
+        "result": {
+            "returncode": 0,
+            "stderr": "Container warning only\n",
+            "stderr_truncated": False,
+        },
+    })
+    actual = server.build_dry_run("nixer", "packages.x86_64-linux.default")
+    assert actual["plan"]["status"] == "not_reported"
+    assert actual["plan"]["build_count"] is None
+    assert actual["plan"]["fetch_count"] is None
+    assert actual["result"]["stderr"] == "Container warning only\n"
+    assert "stderr_summarized" not in actual["result"]
+
+
+def test_dry_run_singular_and_truncated_output_remain_honest() -> None:
+    singular = server._dry_run_plan(
+        "this derivation will be built:\n"
+        "this path will be fetched (1.5 KiB download, 2.2 KiB unpacked):\n",
+        False,
+    )
+    assert singular["build_count"] == singular["fetch_count"] == 1
+    assert singular["download_size"] == "1.5 KiB"
+    assert singular["unpacked_size"] == "2.2 KiB"
+    partial = server._dry_run_plan(
+        "these 42 derivations will be built:\n<OUTPUT_TRUNCATED>\n", True
+    )
+    assert partial["status"] == "reported"
+    assert partial["build_count"] == 42
+    assert partial["fetch_count"] is None
+    assert partial["raw_stderr_truncated"] is True
