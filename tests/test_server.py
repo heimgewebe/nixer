@@ -371,6 +371,7 @@ def test_docker_nix_is_pinned_read_only_and_has_no_host_socket(
     assert result["ok"] is True
     assert captured[0] == str(server.DOCKER_BIN)
     assert "--pull=never" in captured
+    assert captured[1:4] == ["run", "--rm", "--log-driver=none"]
     assert "--cap-drop=ALL" in captured
     assert "--cap-add=CHOWN" in captured
     assert "--cap-add=DAC_READ_SEARCH" in captured
