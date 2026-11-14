@@ -1223,3 +1223,8 @@ def test_system_build_normalizes_deep_bootspec_recursion(monkeypatch, tmp_path: 
     result = evidence.system_build(str(tmp_path), "heim-pc")
     assert result["success"] is False
     assert result["failure"]["class"] == "structured_output_invalid"
+
+
+def test_system_build_uses_captured_stderr_without_container_journald(tmp_path: Path) -> None:
+    argv = evidence._system_build_argv(tmp_path, None, "heim-pc")
+    assert argv[1:4] == ["run", "--rm", "--log-driver=none"]

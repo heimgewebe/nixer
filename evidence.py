@@ -606,6 +606,8 @@ def _system_build_argv(root: Path, git_common_dir: Path | None, host: str) -> li
         str(server.DOCKER_BIN),
         "run",
         "--rm",
+        # Podman defaults to journald; avoid a second copy of captured Nix stderr.
+        "--log-driver=none",
         "--pull=never",
         "--cap-drop=ALL",
         "--cap-add=CHOWN",

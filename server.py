@@ -406,6 +406,8 @@ def _docker_nix(repo: str, nix_args: list[str], *, operation: str, expect_json: 
         str(DOCKER_BIN),
         "run",
         "--rm",
+        # Podman defaults to journald; avoid a second copy of captured Nix stderr.
+        "--log-driver=none",
         "--pull=never",
         "--cap-drop=ALL",
         "--cap-add=CHOWN",
