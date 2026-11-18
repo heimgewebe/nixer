@@ -116,6 +116,10 @@ separate nixos_option calls; it uses one repository snapshot and one evaluation.
 Report technical evidence, including evaluated source, option value and definition
 locations, without claiming Git, PR, build or deployment authority.
 A successful backend evaluation is required before claiming a verified result.
+Select the intended NixOS configuration explicitly; evaluator results do not prove the
+currently booted host's configuration. Build dry-run counts describe only the isolated,
+ephemeral container Nix store, not missing host-store paths or host build costs.
+For host-specific build planning use the authorized operator's native Nix on that host.
 ChatGPT interprets evidence; the authorized operator handles source changes, Git,
 builds and deployment. Nixer has no general shell, task, lease or host control."""
 
@@ -865,6 +869,8 @@ def _dry_run_plan(stderr: str, stderr_truncated: bool) -> dict[str, Any]:
         "download_size": None,
         "unpacked_size": None,
         "source": "nix_build_dry_run_stderr",
+        "store_scope": "ephemeral_container_nix_store",
+        "host_build_estimate": False,
         "raw_stderr_truncated": stderr_truncated,
     }
     if fetches and fetches.group("sizes"):
@@ -880,7 +886,7 @@ def _dry_run_plan(stderr: str, stderr_truncated: bool) -> dict[str, Any]:
 
 
 def build_dry_run(repo: str, attribute: str) -> dict[str, Any]:
-    """Return a compact Nix-reported build plan without building anything."""
+    """Return a compact dry-run plan for the isolated container store, not the host."""
     attr = _validate_attr_path(attribute, field="attribute")
     installable = f"{FLAKE_SOURCE}#{attr}"
     result = _docker_nix(

@@ -1043,6 +1043,7 @@ def test_nixer_mcp_instructions_delegate_interpretation_and_operator_actions() -
     assert "Nixer exposes read-only Nix" in server.INSTRUCTIONS
     assert "prefer nixos_options" in server.INSTRUCTIONS
     assert "ChatGPT interprets evidence" in server.INSTRUCTIONS
+    assert "For host-specific build planning" in server.INSTRUCTIONS
     assert "no general shell" in server.INSTRUCTIONS
 
 def test_dry_run_reports_structured_counts_and_summarizes_paths(
@@ -1077,6 +1078,8 @@ def test_dry_run_reports_structured_counts_and_summarizes_paths(
         "download_size": "234.8 MiB",
         "unpacked_size": "744.3 MiB",
         "source": "nix_build_dry_run_stderr",
+        "store_scope": "ephemeral_container_nix_store",
+        "host_build_estimate": False,
         "raw_stderr_truncated": False,
     }
     assert actual["result"]["stderr_summarized"] is True
@@ -1114,6 +1117,8 @@ def test_dry_run_does_not_invent_zero_for_unreported_work(
     })
     actual = server.build_dry_run("nixer", "packages.x86_64-linux.default")
     assert actual["plan"]["status"] == "not_reported"
+    assert actual["plan"]["store_scope"] == "ephemeral_container_nix_store"
+    assert actual["plan"]["host_build_estimate"] is False
     assert actual["plan"]["build_count"] is None
     assert actual["plan"]["fetch_count"] is None
     assert actual["result"]["stderr"] == "Container warning only\n"
